@@ -1,0 +1,676 @@
+openapi: 3.1.0
+info:
+  title: PragBank · ms-transfers API
+  version: 1.1.0
+  summary: Transferencias entre cuentas PragBank y pago a celular.
+  description: |
+    Contrato del microservicio `ms-transfers` del taller Pragma Perú.
+
+    - Charla 1 (tag `v1-micro`): endpoints del tag **Transferencias**.
+    - Charla 3 (tag `v3-sdd`): se agregan los endpoints del tag **Pago a celular**.
+
+    Convenciones:
+    - Montos como string decimal con máximo 2 decimales (`"150.00"`) para evitar errores de punto flotante.
+    - Errores en formato RFC 9457 (`application/problem+json`) con `code` de negocio estable.
+    - Toda operación que mueve dinero exige `Idempotency-Key`.
+    - `X-Correlation-Id` se propaga a logs, trazas, eventos y llamadas a terceros.
+  contact:
+    name: Backend Chapter · Pragma
+servers:
+  - url: http://localhost:8080
+    description: Local
+  - url: https://{apiId}.execute-api.us-east-1.amazonaws.com/dev
+    description: AWS dev (API Gateway)
+    variables:
+      apiId:
+        default: replace-me
+security:
+  - apiKey: []
+tags:
+  - name: Transferencias
+    description: Transferencias entre cuentas PragBank (charla 1).
+  - name: Pago a celular
+    description: Pago usando el número de celular del destinatario (charla 3).
+paths:
+  /api/v1/transfers:
+    post:
+      tags: [Transferencias]
+      operationId: createTransfer
+      summary: Crear transferencia entre cuentas PragBank
+      description: |
+        Reglas aplicadas: RN-01 a RN-08.
+        Si el `Idempotency-Key` ya fue usado con el mismo cuerpo, responde `200` con la transferencia original y no hace un nuevo cargo.
+        Si fue usado con un cuerpo distinto, responde `409`.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/CustomerId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTransferRequest'
+            examples:
+              alquiler:
+                value:
+                  sourceAccountId: "191-0001234567"
+                  targetAccountId: "191-0007654321"
+                  amount: { value: "150.00", currency: PEN }
+                  description: Pago alquiler octubre
+      responses:
+        '201':
+          description: Transferencia creada; `status` indica el resultado (COMPLETED, PENDING_REVIEW o COMPENSATED).
+          headers:
+            Location:
+              schema: { type: string }
+              example: /api/v1/transfers/8f3c1a2e-5b6d-4c7e-9f10-2a3b4c5d6e7f
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transfer'
+              examples:
+                completada:
+                  $ref: '#/components/examples/TransferCompleted'
+                enRevision:
+                  $ref: '#/components/examples/TransferPendingReview'
+        '200':
+          description: Repetición idempotente; devuelve la transferencia original.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transfer'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '422':
+          $ref: '#/components/responses/TransferUnprocessable'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/transfers/{transferId}:
+    get:
+      tags: [Transferencias]
+      operationId: getTransfer
+      summary: Consultar una transferencia
+      parameters:
+        - $ref: '#/components/parameters/TransferId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/CustomerId'
+      responses:
+        '200':
+          description: Transferencia encontrada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transfer'
+              examples:
+                completada:
+                  $ref: '#/components/examples/TransferCompleted'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/accounts/{accountId}/transfers:
+    get:
+      tags: [Transferencias]
+      operationId: listAccountTransfers
+      summary: Listar transferencias de una cuenta
+      description: Devuelve las transferencias donde la cuenta es origen, ordenadas por `createdAt` descendente.
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/CustomerId'
+        - name: from
+          in: query
+          description: Fecha inicial inclusiva (ISO 8601).
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          description: Fecha final inclusiva (ISO 8601).
+          schema: { type: string, format: date }
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/TransferStatus'
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: Página de transferencias.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/phone-transfers/recipients:
+    get:
+      tags: [Pago a celular]
+      operationId: resolvePhoneRecipient
+      summary: Resolver destinatario por celular
+      description: |
+        Reglas RN-09 y RN-10. Devuelve un `recipientToken` de un solo uso que vence en 5 minutos (RN-12).
+        La cuenta destino nunca se expone al cliente.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/CustomerId'
+        - name: phone
+          in: query
+          required: true
+          description: Celular peruano en formato E.164.
+          schema:
+            type: string
+            pattern: '^\+519\d{8}$'
+          example: "+51987654321"
+      responses:
+        '200':
+          description: Destinatario resuelto.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecipientResolution'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: El celular no está afiliado.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                noAfiliado:
+                  $ref: '#/components/examples/RecipientNotFound'
+        '422':
+          description: El destinatario no es soportado (otro banco).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                otroBanco:
+                  $ref: '#/components/examples/RecipientNotSupported'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/phone-transfers:
+    post:
+      tags: [Pago a celular]
+      operationId: createPhoneTransfer
+      summary: Ejecutar pago a celular
+      description: |
+        Reglas RN-11, RN-12 y RN-13, más RN-03, RN-05, RN-06, RN-07 y RN-08 de la v1.
+        Reutiliza el flujo de débito, crédito y compensación de `createTransfer`.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/CustomerId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePhoneTransferRequest'
+            examples:
+              almuerzo:
+                value:
+                  sourceAccountId: "191-0001234567"
+                  recipientToken: rt_01JAB3X9K2M7
+                  amount: { value: "45.50", currency: PEN }
+                  description: Almuerzo
+      responses:
+        '201':
+          description: Pago creado.
+          headers:
+            Location:
+              schema: { type: string }
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transfer'
+              examples:
+                pagoCelular:
+                  $ref: '#/components/examples/PhoneTransferCompleted'
+        '200':
+          description: Repetición idempotente; devuelve el pago original.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transfer'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '422':
+          $ref: '#/components/responses/PhoneTransferUnprocessable'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: API key de API Gateway (usage plan). La valida API Gateway; el micro no la ve.
+  headers:
+    CorrelationId:
+      description: Identificador de correlación (se genera si no llega en la petición).
+      schema: { type: string, format: uuid }
+  parameters:
+    CustomerId:
+      name: X-Customer-Id
+      in: header
+      required: true
+      description: Cliente que hace la operación. Reemplaza al JWT en el taller; el micro lo usa para validar que la cuenta origen sea suya (403 ACCOUNT_NOT_OWNED).
+      schema:
+        type: string
+      example: CUST-000123
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: UUID generado por el cliente; se conserva 24 horas.
+      schema: { type: string, format: uuid }
+      example: 3b1f6c2a-9d4e-4f7a-8b21-5c6d7e8f9a01
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      schema: { type: string, format: uuid }
+    TransferId:
+      name: transferId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/AccountId'
+  schemas:
+    AccountId:
+      type: string
+      description: Número de cuenta PragBank.
+      pattern: '^\d{3}-\d{10}$'
+      example: "191-0001234567"
+    Money:
+      type: object
+      required: [value, currency]
+      properties:
+        value:
+          type: string
+          description: Monto decimal positivo con máximo 2 decimales (RN-03).
+          pattern: '^\d{1,12}(\.\d{1,2})?$'
+          example: "150.00"
+        currency:
+          type: string
+          enum: [PEN, USD]
+    CreateTransferRequest:
+      type: object
+      required: [sourceAccountId, targetAccountId, amount]
+      additionalProperties: false
+      properties:
+        sourceAccountId:
+          $ref: '#/components/schemas/AccountId'
+        targetAccountId:
+          $ref: '#/components/schemas/AccountId'
+        amount:
+          $ref: '#/components/schemas/Money'
+        description:
+          type: string
+          maxLength: 140
+    CreatePhoneTransferRequest:
+      type: object
+      required: [sourceAccountId, recipientToken, amount]
+      additionalProperties: false
+      properties:
+        sourceAccountId:
+          $ref: '#/components/schemas/AccountId'
+        recipientToken:
+          type: string
+          description: Token devuelto por `resolvePhoneRecipient`.
+          example: rt_01JAB3X9K2M7
+        amount:
+          $ref: '#/components/schemas/Money'
+        description:
+          type: string
+          maxLength: 140
+    TransferStatus:
+      type: string
+      enum: [RECEIVED, DEBITED, COMPLETED, REJECTED, PENDING_REVIEW, COMPENSATED]
+    TransferChannel:
+      type: string
+      enum: [ACCOUNT, PHONE]
+    Transfer:
+      type: object
+      required: [transferId, status, channel, amount, sourceAccountId, createdAt]
+      properties:
+        transferId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/TransferStatus'
+        channel:
+          $ref: '#/components/schemas/TransferChannel'
+        amount:
+          $ref: '#/components/schemas/Money'
+        sourceAccountId:
+          $ref: '#/components/schemas/AccountId'
+        targetAccountId:
+          description: Presente solo cuando `channel` es ACCOUNT.
+          $ref: '#/components/schemas/AccountId'
+        targetPhoneMasked:
+          type: string
+          description: Presente solo cuando `channel` es PHONE.
+          example: "+51 9** *** 321"
+        description:
+          type: string
+        failureCode:
+          type: string
+          description: Código de negocio cuando `status` es REJECTED o COMPENSATED.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    TransferPage:
+      type: object
+      required: [content, page, size, totalElements, totalPages]
+      properties:
+        content:
+          type: array
+          items:
+            $ref: '#/components/schemas/Transfer'
+        page: { type: integer }
+        size: { type: integer }
+        totalElements: { type: integer, format: int64 }
+        totalPages: { type: integer }
+    RecipientResolution:
+      type: object
+      required: [recipientToken, maskedName, bank, expiresAt]
+      properties:
+        recipientToken:
+          type: string
+          example: rt_01JAB3X9K2M7
+        maskedName:
+          type: string
+          example: "Mar*** Qui***"
+        bank:
+          type: string
+          enum: [PRAGBANK]
+        expiresAt:
+          type: string
+          format: date-time
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details con extensiones de PragBank.
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        detail:
+          type: string
+        instance:
+          type: string
+        correlationId:
+          type: string
+          format: uuid
+        errors:
+          type: array
+          description: Detalle por campo en errores de validación.
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }
+    ErrorCode:
+      type: string
+      enum:
+        - VALIDATION_ERROR
+        - AMOUNT_INVALID
+        - PHONE_INVALID
+        - UNAUTHORIZED
+        - ACCOUNT_NOT_OWNED
+        - TRANSFER_NOT_FOUND
+        - RECIPIENT_NOT_FOUND
+        - IDEMPOTENCY_KEY_REUSED
+        - ACCOUNT_INVALID
+        - CURRENCY_MISMATCH
+        - LIMIT_PER_TX_EXCEEDED
+        - DAILY_LIMIT_EXCEEDED
+        - INSUFFICIENT_FUNDS
+        - FRAUD_REJECTED
+        - RECIPIENT_NOT_SUPPORTED
+        - RECIPIENT_TOKEN_EXPIRED
+        - SELF_TRANSFER
+        - DEPENDENCY_UNAVAILABLE
+  responses:
+    BadRequest:
+      description: Petición mal formada (RN-03, RN-09 o validación de esquema).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            montoInvalido:
+              value:
+                type: https://api.pragbank.pe/errors/amount-invalid
+                title: Monto inválido
+                status: 400
+                code: AMOUNT_INVALID
+                detail: El monto debe ser mayor a 0 y tener máximo 2 decimales
+                errors:
+                  - field: amount.value
+                    message: "debe cumplir ^\\d{1,12}(\\.\\d{1,2})?$"
+    Unauthorized:
+      description: API key ausente o inválida (la rechaza API Gateway antes de llegar al micro).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: La cuenta no pertenece al cliente autenticado.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            cuentaAjena:
+              value:
+                type: https://api.pragbank.pe/errors/account-not-owned
+                title: Cuenta no autorizada
+                status: 403
+                code: ACCOUNT_NOT_OWNED
+    NotFound:
+      description: Transferencia no encontrada.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            noExiste:
+              value:
+                type: https://api.pragbank.pe/errors/transfer-not-found
+                title: Transferencia no encontrada
+                status: 404
+                code: TRANSFER_NOT_FOUND
+    IdempotencyConflict:
+      description: El Idempotency-Key ya se usó con un cuerpo distinto.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            llaveReusada:
+              value:
+                type: https://api.pragbank.pe/errors/idempotency-key-reused
+                title: Idempotency-Key reutilizado
+                status: 409
+                code: IDEMPOTENCY_KEY_REUSED
+    TransferUnprocessable:
+      description: Regla de negocio incumplida (RN-01, RN-02, RN-04 a RN-07).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            saldoInsuficiente:
+              $ref: '#/components/examples/InsufficientFunds'
+            limiteOperacion:
+              value:
+                type: https://api.pragbank.pe/errors/limit-per-tx-exceeded
+                title: Límite por operación excedido
+                status: 422
+                code: LIMIT_PER_TX_EXCEEDED
+                detail: El máximo por operación es S/ 10,000.00
+            limiteDiario:
+              value:
+                type: https://api.pragbank.pe/errors/daily-limit-exceeded
+                title: Límite diario excedido
+                status: 422
+                code: DAILY_LIMIT_EXCEEDED
+                detail: El acumulado diario no puede superar S/ 30,000.00
+            monedaDistinta:
+              value:
+                type: https://api.pragbank.pe/errors/currency-mismatch
+                title: Monedas distintas
+                status: 422
+                code: CURRENCY_MISMATCH
+            fraude:
+              value:
+                type: https://api.pragbank.pe/errors/fraud-rejected
+                title: Operación rechazada
+                status: 422
+                code: FRAUD_REJECTED
+    PhoneTransferUnprocessable:
+      description: Regla de negocio incumplida en pago a celular.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            tokenVencido:
+              value:
+                type: https://api.pragbank.pe/errors/recipient-token-expired
+                title: Destinatario vencido
+                status: 422
+                code: RECIPIENT_TOKEN_EXPIRED
+                detail: Vuelve a buscar el celular; el token dura 5 minutos
+            mismoCelular:
+              value:
+                type: https://api.pragbank.pe/errors/self-transfer
+                title: No puedes pagarte a ti mismo
+                status: 422
+                code: SELF_TRANSFER
+            limiteCelular:
+              value:
+                type: https://api.pragbank.pe/errors/limit-per-tx-exceeded
+                title: Límite por operación excedido
+                status: 422
+                code: LIMIT_PER_TX_EXCEEDED
+                detail: El máximo por pago a celular es S/ 500.00
+            saldoInsuficiente:
+              $ref: '#/components/examples/InsufficientFunds'
+    ServiceUnavailable:
+      description: El core o el directorio no responden; el cliente puede reintentar con el mismo Idempotency-Key.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+          description: Segundos sugeridos antes de reintentar.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            coreCaido:
+              value:
+                type: https://api.pragbank.pe/errors/dependency-unavailable
+                title: Servicio no disponible
+                status: 503
+                code: DEPENDENCY_UNAVAILABLE
+  examples:
+    TransferCompleted:
+      value:
+        transferId: 8f3c1a2e-5b6d-4c7e-9f10-2a3b4c5d6e7f
+        status: COMPLETED
+        channel: ACCOUNT
+        amount: { value: "150.00", currency: PEN }
+        sourceAccountId: "191-0001234567"
+        targetAccountId: "191-0007654321"
+        description: Pago alquiler octubre
+        createdAt: "2026-10-15T15:04:05Z"
+        updatedAt: "2026-10-15T15:04:06Z"
+    TransferPendingReview:
+      value:
+        transferId: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+        status: PENDING_REVIEW
+        channel: ACCOUNT
+        amount: { value: "9500.00", currency: PEN }
+        sourceAccountId: "191-0001234567"
+        targetAccountId: "191-0007654321"
+        createdAt: "2026-10-15T15:10:00Z"
+    PhoneTransferCompleted:
+      value:
+        transferId: 5d6e7f80-1a2b-4c3d-9e8f-7a6b5c4d3e2f
+        status: COMPLETED
+        channel: PHONE
+        amount: { value: "45.50", currency: PEN }
+        sourceAccountId: "191-0001234567"
+        targetPhoneMasked: "+51 9** *** 321"
+        description: Almuerzo
+        createdAt: "2026-10-15T15:06:10Z"
+    InsufficientFunds:
+      value:
+        type: https://api.pragbank.pe/errors/insufficient-funds
+        title: Saldo insuficiente
+        status: 422
+        code: INSUFFICIENT_FUNDS
+        detail: La cuenta 191-0001234567 no tiene saldo disponible para S/ 150.00
+        correlationId: c0ffee00-1234-4abc-9def-000000000001
+    RecipientNotFound:
+      value:
+        type: https://api.pragbank.pe/errors/recipient-not-found
+        title: Celular no afiliado
+        status: 404
+        code: RECIPIENT_NOT_FOUND
+    RecipientNotSupported:
+      value:
+        type: https://api.pragbank.pe/errors/recipient-not-supported
+        title: Destinatario de otro banco
+        status: 422
+        code: RECIPIENT_NOT_SUPPORTED
+        detail: Por ahora solo puedes pagar a celulares de clientes PragBank

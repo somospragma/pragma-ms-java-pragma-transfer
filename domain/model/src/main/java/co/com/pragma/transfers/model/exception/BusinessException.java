@@ -16,6 +16,18 @@ public class BusinessException extends DomainException {
         super(code, message, metadata, null);
     }
 
+    public BusinessException(ErrorCatalog error) {
+        this(error.code(), error.defaultMessage());
+    }
+
+    public BusinessException(ErrorCatalog error, String message) {
+        this(error.code(), message);
+    }
+
+    public BusinessException(ErrorCatalog error, String message, Map<String, Object> metadata) {
+        this(error.code(), message, metadata);
+    }
+
     @Override
     public Kind kind() {
         return Kind.BUSINESS;

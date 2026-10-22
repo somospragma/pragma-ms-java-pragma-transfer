@@ -15,6 +15,7 @@ dependencies {
     implementation("io.projectreactor:reactor-core")
     implementation(libs.boot.starter)
     implementation("org.springframework.boot:spring-boot-autoconfigure")
+    implementation("tools.jackson.core:jackson-databind")
 
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.boot.starter.test)

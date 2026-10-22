@@ -23,9 +23,9 @@ public class OpenApiConfig {
         return new OpenAPI()
             .info(new Info()
                 .title("ms-transfers API")
-                .version("v1")
-                .description("PragBank Perú - transferencias entre cuentas PragBank. Generada desde el código; "
-                    + "contrato de referencia: openapi/ms-transfers-v1.yaml."))
+                .version("1.1.0")
+                .description("PragBank Perú - transferencias entre cuentas PragBank y pago a celular. Generada desde "
+                    + "el código; contrato de referencia: openapi/ms-transfers-v3.yaml."))
             .components(new Components().addSecuritySchemes(API_KEY, new SecurityScheme()
                 .type(SecurityScheme.Type.APIKEY)
                 .in(SecurityScheme.In.HEADER)

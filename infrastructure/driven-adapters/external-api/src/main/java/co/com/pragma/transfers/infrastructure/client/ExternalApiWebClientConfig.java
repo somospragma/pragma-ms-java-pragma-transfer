@@ -13,7 +13,7 @@ import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
 
 /**
- * WebClients del core bancario y de antifraude con timeouts de transporte
+ * WebClients del core bancario, antifraude y directorio de alias con timeouts de transporte
  * (ultima linea de defensa, RES-O-001) y pool de conexiones propio por
  * dependencia (PERF-O-003). La llave viaja en X-Api-Key y llega por variable
  * de entorno desde Secrets Manager; nunca se escribe en el repo.
@@ -35,6 +35,13 @@ public class ExternalApiWebClientConfig {
             @Value("${fraud.base-url}") String baseUrl,
             @Value("${fraud.api-key:}") String apiKey) {
         return build("fraud", baseUrl, apiKey);
+    }
+
+    @Bean
+    public WebClient directoryWebClient(
+            @Value("${directory.base-url}") String baseUrl,
+            @Value("${directory.api-key:}") String apiKey) {
+        return build("directory", baseUrl, apiKey);
     }
 
     private WebClient build(String name, String baseUrl, String apiKey) {

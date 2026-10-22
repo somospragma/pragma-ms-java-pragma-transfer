@@ -39,4 +39,4 @@ curl -s http://localhost:9090/__admin/mappings | grep -c '"name"'
 
 Sin NAT, Fargate no puede descargar WireMock de Docker Hub. Por eso `mocks/Dockerfile` arma una imagen de WireMock con estos stubs y el pipeline del micro la sube al ECR `pragma-transfers-dev-ecr-mocks` (tag `latest`) y reinicia el servicio ECS `mocks`.
 
-El micro la encuentra por Cloud Map en `http://mocks.pragbank.local:8080` (`CORE_BASE_URL` y `FRAUD_BASE_URL`). Para cambiar un mock, edita el JSON en `mappings/` y haz merge a `main`.
+El micro la encuentra por Cloud Map en `http://mocks.pragbank.local:8080` (`CORE_BASE_URL`, `FRAUD_BASE_URL` y `DIRECTORY_BASE_URL`). Para cambiar un mock, edita el JSON en `mappings/` y haz merge a `main`.

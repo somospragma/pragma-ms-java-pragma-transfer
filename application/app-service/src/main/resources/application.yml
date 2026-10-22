@@ -1,10 +1,23 @@
 spring:
   application:
     name: ${SERVICE_NAME:ms-transfers}
+  jackson:
+    deserialization:
+      # El contrato declara additionalProperties: false en CreateTransferRequest y CreatePhoneTransferRequest.
+      fail-on-unknown-properties: true
 
 transfers:
   service-name: ${SERVICE_NAME:ms-transfers}
   max-page-size: 100
+  limits:
+    per-transaction: ${TRANSFER_LIMIT_PER_TX:10000.00}   # RN-04
+    daily: ${TRANSFER_LIMIT_DAILY:30000.00}              # RN-05
+    zone: ${TRANSFER_BUSINESS_ZONE:America/Lima}
+    idempotency-ttl: 24h                                 # RN-08
+  phone:
+    per-transaction: ${PHONE_TRANSFER_LIMIT_PER_TX:500.00}  # RN-11
+    currency: PEN                                           # RN-11
+    token-ttl: ${RECIPIENT_TOKEN_TTL:5m}                    # RN-12
 
 server:
   port: ${SERVER_PORT:8080}
@@ -36,13 +49,14 @@ management:
 secrets:
   apis-name: ${SECRET_APIS_NAME:}
 
-# Persistencia (tablas transfers e idempotency). En ECS las credenciales vienen del task role.
+# Persistencia (tablas transfers, idempotency y recipient-tokens). En ECS las credenciales vienen del task role.
 dynamodb:
   enabled: ${DYNAMODB_ENABLED:false}
   endpoint: ${DYNAMODB_ENDPOINT:}
   table:
     transfers: ${DYNAMODB_TABLE_TRANSFERS:transfers}
     idempotency: ${DYNAMODB_TABLE_IDEMPOTENCY:idempotency}
+    recipient-tokens: ${DYNAMODB_TABLE_RECIPIENT_TOKENS:recipient-tokens}
 
 # Eventos de dominio (transfers-events.asyncapi.yaml)
 sns:
@@ -55,10 +69,19 @@ sns:
 core-banking:
   base-url: ${CORE_BASE_URL:http://localhost:9090}
   api-key: ${CORE_API_KEY:local-dev-key}
+  timeout: ${CORE_TIMEOUT:2s}
 
 fraud:
   base-url: ${FRAUD_BASE_URL:http://localhost:9091}
   api-key: ${FRAUD_API_KEY:local-dev-key}
+  # Contrato de antifraude: si no responde en 1 s la transferencia queda PENDING_REVIEW.
+  timeout: ${FRAUD_TIMEOUT:1s}
+
+# Directorio de alias por celular (HU-03, openapi/alias-directory.yaml).
+directory:
+  base-url: ${DIRECTORY_BASE_URL:http://localhost:9090}
+  api-key: ${DIRECTORY_API_KEY:local-dev-key}
+  timeout: ${DIRECTORY_TIMEOUT:2s}
 
 resilience4j:
   circuitbreaker:
@@ -72,10 +95,15 @@ resilience4j:
         automaticTransitionFromOpenToHalfOpenEnabled: true
         waitDurationInOpenState: 30s
         failureRateThreshold: 50
+        # Los rechazos de negocio del core (saldo, cuenta bloqueada) no abren el circuito.
+        ignoreExceptions:
+          - co.com.pragma.transfers.model.exception.BusinessException
     instances:
       coreBanking:
         baseConfig: default
       fraud:
+        baseConfig: default
+      directory:
         baseConfig: default
   retry:
     configs:
@@ -85,14 +113,17 @@ resilience4j:
         enableExponentialBackoff: true
         exponentialBackoffMultiplier: 2
         randomizedWaitFactor: 0.5
+        # Los adaptadores traducen timeouts, I/O y 5xx a TechnicalException.
         retryExceptions:
-          - java.io.IOException
-          - java.util.concurrent.TimeoutException
+          - co.com.pragma.transfers.model.exception.TechnicalException
     instances:
       # Solo consultas: los débitos y créditos no se reintentan a ciegas (los protege el operationId).
       coreBanking:
         baseConfig: default
       fraud:
+        baseConfig: default
+      # Lectura (GET del alias): se reintenta.
+      directory:
         baseConfig: default
   bulkhead:
     instances:
@@ -100,6 +131,9 @@ resilience4j:
         maxConcurrentCalls: 20
         maxWaitDuration: 50ms
       fraud:
+        maxConcurrentCalls: 20
+        maxWaitDuration: 50ms
+      directory:
         maxConcurrentCalls: 20
         maxWaitDuration: 50ms
 
@@ -112,6 +146,8 @@ springdoc:
     urls:
       - name: ms-transfers (generado desde el código)
         url: /v3/api-docs
+      - name: ms-transfers v3 (contrato)
+        url: /openapi/ms-transfers-v3.yaml
       - name: ms-transfers v1 (contrato)
         url: /openapi/ms-transfers-v1.yaml
       - name: core bancario (mock)

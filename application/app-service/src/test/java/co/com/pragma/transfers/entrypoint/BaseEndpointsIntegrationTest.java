@@ -43,13 +43,13 @@ class BaseEndpointsIntegrationTest {
 
     @Test
     void shouldReturnRfc7807ProblemForUnknownRoute() {
-        client.get().uri("/api/v1/transfers/unknown")
+        client.get().uri("/api/v1/unknown")
             .exchange()
             .expectStatus().isNotFound()
             .expectHeader().contentType("application/problem+json")
             .expectBody()
             .jsonPath("$.status").isEqualTo(404)
-            .jsonPath("$.code").isEqualTo("TRF-404-000");
+            .jsonPath("$.code").isEqualTo("ROUTE_NOT_FOUND");
     }
 
     @Test
@@ -60,6 +60,7 @@ class BaseEndpointsIntegrationTest {
             .expectHeader().valueEquals("X-Frame-Options", "DENY")
             .expectHeader().exists("Content-Security-Policy")
             .expectHeader().exists("Strict-Transport-Security")
-            .expectHeader().exists("X-Request-ID");
+            .expectHeader().exists("X-Request-ID")
+            .expectHeader().exists("X-Correlation-Id");
     }
 }
