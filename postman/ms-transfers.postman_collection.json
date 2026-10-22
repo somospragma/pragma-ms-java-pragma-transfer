@@ -1,0 +1,2051 @@
+{
+  "info": {
+    "_postman_id": "df001e44-6ec2-5a6f-9277-271161adf919",
+    "name": "PragBank · ms-transfers (HU-01 y HU-03)",
+    "description": "Transferencias (HU-01) y pago a celular (HU-03) vía API Gateway.\n\n1. Importar también `ms-transfers-dev.postman_environment.json` y poner la API key en `apiKey`.\n2. Correr la colección completa con el Runner, en orden: cada carpeta guarda `transferId` y `recipientToken` para los requests siguientes.\n3. Cada corrida usa un cliente nuevo (cuenta comodín `191-8…` de los mocks), así el límite diario arranca en cero. El caso de `SELF_TRANSFER` usa el cliente fijo `CUST-000123`.\n\nDatos: los de `mocks/README.md`. Contrato: `openapi/ms-transfers-v3.yaml`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "key",
+        "value": "x-api-key",
+        "type": "string"
+      },
+      {
+        "key": "value",
+        "value": "{{apiKey}}",
+        "type": "string"
+      },
+      {
+        "key": "in",
+        "value": "header",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "00 · Infra",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            },
+            "description": "Prueba la cadena API Gateway → VPC Link → balanceador → micro."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"UP\", () => pm.expect(pm.response.json().status).to.eql(\"UP\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Sin x-api-key → 403",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            },
+            "description": "",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 403\", () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "x-api-key inválida → 403",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            },
+            "description": "",
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                {
+                  "key": "key",
+                  "value": "x-api-key",
+                  "type": "string"
+                },
+                {
+                  "key": "value",
+                  "value": "llave-invalida",
+                  "type": "string"
+                },
+                {
+                  "key": "in",
+                  "value": "header",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 403\", () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "HU-01 · Transferencias",
+      "item": [
+        {
+          "name": "Crear transferencia → 201 COMPLETED",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers"
+              ]
+            },
+            "description": "Guarda transferId e idempotencyKey para los siguientes requests.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{runSourceAccountId}}\",\n  \"targetAccountId\": \"{{targetAccountId}}\",\n  \"amount\": {\n    \"value\": \"150.00\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Pago alquiler\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Cliente nuevo por corrida: cuenta comodín 191-8… (S/ 50,000 en el mock) y su dueño CUST-{cuenta}",
+                  "const n = String(Math.floor(Math.random() * 1e9)).padStart(9, \"0\");",
+                  "pm.collectionVariables.set(\"runSourceAccountId\", \"191-8\" + n);",
+                  "pm.collectionVariables.set(\"runCustomerId\", \"CUST-191-8\" + n);",
+                  "pm.collectionVariables.set(\"idempotencyKey\", pm.variables.replaceIn(\"{{$guid}}\"));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+                  "const t = pm.response.json();",
+                  "pm.test(\"COMPLETED\", () => pm.expect(t.status).to.eql(\"COMPLETED\"));",
+                  "pm.test(\"Location\", () => pm.response.to.have.header(\"Location\"));",
+                  "pm.collectionVariables.set(\"transferId\", t.transferId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Repetir misma llave → 200 idempotente",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{runSourceAccountId}}\",\n  \"targetAccountId\": \"{{targetAccountId}}\",\n  \"amount\": {\n    \"value\": \"150.00\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Pago alquiler\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"misma transferencia\", () => pm.expect(pm.response.json().transferId).to.eql(pm.collectionVariables.get(\"transferId\")));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Misma llave, otro monto → 409",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{runSourceAccountId}}\",\n  \"targetAccountId\": \"{{targetAccountId}}\",\n  \"amount\": {\n    \"value\": \"151.00\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Pago alquiler\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 409\", () => pm.response.to.have.status(409));",
+                  "pm.test(\"code IDEMPOTENCY_KEY_REUSED\", () => pm.expect(pm.response.json().code).to.eql(\"IDEMPOTENCY_KEY_REUSED\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Consultar transferencia → 200",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers/{{transferId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers",
+                "{{transferId}}"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"COMPLETED\", () => pm.expect(pm.response.json().status).to.eql(\"COMPLETED\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Consultar como otro cliente → 403",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{otherCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers/{{transferId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers",
+                "{{transferId}}"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 403\", () => pm.response.to.have.status(403));",
+                  "pm.test(\"code ACCOUNT_NOT_OWNED\", () => pm.expect(pm.response.json().code).to.eql(\"ACCOUNT_NOT_OWNED\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Consultar inexistente → 404",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers/{{$guid}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers",
+                "{{$guid}}"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 404\", () => pm.response.to.have.status(404));",
+                  "pm.test(\"code TRANSFER_NOT_FOUND\", () => pm.expect(pm.response.json().code).to.eql(\"TRANSFER_NOT_FOUND\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Historial de la cuenta → 200",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/accounts/{{runSourceAccountId}}/transfers?page=0&size=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "accounts",
+                "{{runSourceAccountId}}",
+                "transfers"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "0"
+                },
+                {
+                  "key": "size",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"incluye la transferencia\", () => pm.expect(pm.response.json().content.map(t => t.transferId)).to.include(pm.collectionVariables.get(\"transferId\")));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Historial de cuenta ajena → 403",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/accounts/{{targetAccountId}}/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "accounts",
+                "{{targetAccountId}}",
+                "transfers"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 403\", () => pm.response.to.have.status(403));",
+                  "pm.test(\"code ACCOUNT_NOT_OWNED\", () => pm.expect(pm.response.json().code).to.eql(\"ACCOUNT_NOT_OWNED\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Sin X-Customer-Id → 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{runSourceAccountId}}\",\n  \"targetAccountId\": \"{{targetAccountId}}\",\n  \"amount\": {\n    \"value\": \"10.00\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 401\", () => pm.response.to.have.status(401));",
+                  "pm.test(\"code UNAUTHORIZED\", () => pm.expect(pm.response.json().code).to.eql(\"UNAUTHORIZED\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Monto con 3 decimales → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{runSourceAccountId}}\",\n  \"targetAccountId\": \"{{targetAccountId}}\",\n  \"amount\": {\n    \"value\": \"10.001\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"code AMOUNT_INVALID\", () => pm.expect(pm.response.json().code).to.eql(\"AMOUNT_INVALID\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cuenta origen ajena → 403",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{targetAccountId}}\",\n  \"targetAccountId\": \"{{runSourceAccountId}}\",\n  \"amount\": {\n    \"value\": \"10.00\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 403\", () => pm.response.to.have.status(403));",
+                  "pm.test(\"code ACCOUNT_NOT_OWNED\", () => pm.expect(pm.response.json().code).to.eql(\"ACCOUNT_NOT_OWNED\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Más de S/ 10,000 → 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{runSourceAccountId}}\",\n  \"targetAccountId\": \"{{targetAccountId}}\",\n  \"amount\": {\n    \"value\": \"10000.01\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"code LIMIT_PER_TX_EXCEEDED\", () => pm.expect(pm.response.json().code).to.eql(\"LIMIT_PER_TX_EXCEEDED\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cuenta destino inexistente → 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{runSourceAccountId}}\",\n  \"targetAccountId\": \"191-0000000001\",\n  \"amount\": {\n    \"value\": \"10.00\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"code ACCOUNT_INVALID\", () => pm.expect(pm.response.json().code).to.eql(\"ACCOUNT_INVALID\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Saldo insuficiente → 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "CUST-{{poorAccountId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{poorAccountId}}\",\n  \"targetAccountId\": \"{{targetAccountId}}\",\n  \"amount\": {\n    \"value\": \"500.00\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Cuenta comodín 191-7… con S/ 100 en el mock",
+                  "pm.collectionVariables.set(\"poorAccountId\", \"191-7\" + String(Math.floor(Math.random() * 1e9)).padStart(9, \"0\"));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"code INSUFFICIENT_FUNDS\", () => pm.expect(pm.response.json().code).to.eql(\"INSUFFICIENT_FUNDS\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Límite diario 1/4 · S/ 9,000 → 201",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "CUST-{{dailyAccountId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers"
+              ]
+            },
+            "description": "Corre los 4 pasos en orden: 3 × S/ 9,000 pasan y S/ 3,500 supera los S/ 30,000 del día.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{dailyAccountId}}\",\n  \"targetAccountId\": \"{{targetAccountId}}\",\n  \"amount\": {\n    \"value\": \"9000.00\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Cliente nuevo solo para esta secuencia: el acumulado del día arranca en cero",
+                  "pm.collectionVariables.set(\"dailyAccountId\", \"191-8\" + String(Math.floor(Math.random() * 1e9)).padStart(9, \"0\"));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Límite diario 2/4 · S/ 9,000 → 201",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "CUST-{{dailyAccountId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{dailyAccountId}}\",\n  \"targetAccountId\": \"{{targetAccountId}}\",\n  \"amount\": {\n    \"value\": \"9000.00\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Límite diario 3/4 · S/ 9,000 → 201",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "CUST-{{dailyAccountId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{dailyAccountId}}\",\n  \"targetAccountId\": \"{{targetAccountId}}\",\n  \"amount\": {\n    \"value\": \"9000.00\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Límite diario 4/4 · S/ 3,500 → 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "CUST-{{dailyAccountId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{dailyAccountId}}\",\n  \"targetAccountId\": \"{{targetAccountId}}\",\n  \"amount\": {\n    \"value\": \"3500.00\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"code DAILY_LIMIT_EXCEEDED\", () => pm.expect(pm.response.json().code).to.eql(\"DAILY_LIMIT_EXCEEDED\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Crédito falla → 201 COMPENSATED",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{runSourceAccountId}}\",\n  \"targetAccountId\": \"{{creditFailsAccountId}}\",\n  \"amount\": {\n    \"value\": \"200.00\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+                  "pm.test(\"COMPENSATED / CREDIT_FAILED\", () => { const t = pm.response.json(); pm.expect(t.status).to.eql(\"COMPENSATED\"); pm.expect(t.failureCode).to.eql(\"CREDIT_FAILED\"); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Antifraude score 67 → 201 PENDING_REVIEW",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers"
+              ]
+            },
+            "description": "Suma S/ 9,500 al límite diario del cliente (S/ 30,000). Con varias corridas el mismo día aparece DAILY_LIMIT_EXCEEDED.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{runSourceAccountId}}\",\n  \"targetAccountId\": \"{{targetAccountId}}\",\n  \"amount\": {\n    \"value\": \"9500.00\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+                  "pm.test(\"PENDING_REVIEW\", () => pm.expect(pm.response.json().status).to.eql(\"PENDING_REVIEW\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "HU-03 · Pago a celular",
+      "item": [
+        {
+          "name": "Resolver celular PragBank → 200",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/phone-transfers/recipients?phone={{phonePragbank}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "phone-transfers",
+                "recipients"
+              ],
+              "query": [
+                {
+                  "key": "phone",
+                  "value": "{{phonePragbank}}"
+                }
+              ]
+            },
+            "description": "Guarda recipientToken (vence en 5 minutos, un solo uso). El + del celular va como %2B."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Cliente nuevo por corrida: cuenta comodín 191-8… (S/ 50,000 en el mock) y su dueño CUST-{cuenta}",
+                  "const n = String(Math.floor(Math.random() * 1e9)).padStart(9, \"0\");",
+                  "pm.collectionVariables.set(\"runSourceAccountId\", \"191-8\" + n);",
+                  "pm.collectionVariables.set(\"runCustomerId\", \"CUST-191-8\" + n);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test(\"token rt_\", () => pm.expect(r.recipientToken).to.match(/^rt_/));",
+                  "pm.test(\"nombre enmascarado\", () => pm.expect(r.maskedName).to.not.include(\"Quiroz\"));",
+                  "pm.test(\"no expone la cuenta\", () => pm.expect(pm.response.text()).to.not.include(pm.collectionVariables.get(\"targetAccountId\")));",
+                  "pm.collectionVariables.set(\"recipientToken\", r.recipientToken);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Celular inválido → 400",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/phone-transfers/recipients?phone=987654321",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "phone-transfers",
+                "recipients"
+              ],
+              "query": [
+                {
+                  "key": "phone",
+                  "value": "987654321"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"code PHONE_INVALID\", () => pm.expect(pm.response.json().code).to.eql(\"PHONE_INVALID\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Celular no afiliado → 404",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/phone-transfers/recipients?phone=%2B51955555555",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "phone-transfers",
+                "recipients"
+              ],
+              "query": [
+                {
+                  "key": "phone",
+                  "value": "%2B51955555555"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 404\", () => pm.response.to.have.status(404));",
+                  "pm.test(\"code RECIPIENT_NOT_FOUND\", () => pm.expect(pm.response.json().code).to.eql(\"RECIPIENT_NOT_FOUND\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Celular de otro banco → 422",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/phone-transfers/recipients?phone={{phoneOtherBank}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "phone-transfers",
+                "recipients"
+              ],
+              "query": [
+                {
+                  "key": "phone",
+                  "value": "{{phoneOtherBank}}"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"code RECIPIENT_NOT_SUPPORTED\", () => pm.expect(pm.response.json().code).to.eql(\"RECIPIENT_NOT_SUPPORTED\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Pago mayor a S/ 500 → 422 (no consume el token)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/phone-transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "phone-transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{runSourceAccountId}}\",\n  \"recipientToken\": \"{{recipientToken}}\",\n  \"amount\": {\n    \"value\": \"500.01\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Almuerzo\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"code LIMIT_PER_TX_EXCEEDED\", () => pm.expect(pm.response.json().code).to.eql(\"LIMIT_PER_TX_EXCEEDED\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Pago en USD → 422 (no consume el token)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/phone-transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "phone-transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{runSourceAccountId}}\",\n  \"recipientToken\": \"{{recipientToken}}\",\n  \"amount\": {\n    \"value\": \"10.00\",\n    \"currency\": \"USD\"\n  },\n  \"description\": \"Almuerzo\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"code LIMIT_PER_TX_EXCEEDED\", () => pm.expect(pm.response.json().code).to.eql(\"LIMIT_PER_TX_EXCEEDED\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Pagar a celular → 201 COMPLETED PHONE",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{phoneIdempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/phone-transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "phone-transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{runSourceAccountId}}\",\n  \"recipientToken\": \"{{recipientToken}}\",\n  \"amount\": {\n    \"value\": \"45.50\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Almuerzo\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set(\"phoneIdempotencyKey\", pm.variables.replaceIn(\"{{$guid}}\"));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+                  "const t = pm.response.json();",
+                  "pm.test(\"COMPLETED\", () => pm.expect(t.status).to.eql(\"COMPLETED\"));",
+                  "pm.test(\"channel PHONE\", () => pm.expect(t.channel).to.eql(\"PHONE\"));",
+                  "pm.test(\"celular enmascarado\", () => pm.expect(t.targetPhoneMasked).to.eql(\"+51 9** *** 321\"));",
+                  "pm.test(\"sin cuenta destino\", () => pm.expect(t.targetAccountId).to.be.undefined);",
+                  "pm.collectionVariables.set(\"phoneTransferId\", t.transferId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Repetir el pago con la misma llave → 200",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{phoneIdempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/phone-transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "phone-transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{runSourceAccountId}}\",\n  \"recipientToken\": \"{{recipientToken}}\",\n  \"amount\": {\n    \"value\": \"45.50\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Almuerzo\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"mismo pago\", () => pm.expect(pm.response.json().transferId).to.eql(pm.collectionVariables.get(\"phoneTransferId\")));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reusar el token → 422 (uso único)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/phone-transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "phone-transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{runSourceAccountId}}\",\n  \"recipientToken\": \"{{recipientToken}}\",\n  \"amount\": {\n    \"value\": \"45.50\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Almuerzo\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"code RECIPIENT_TOKEN_EXPIRED\", () => pm.expect(pm.response.json().code).to.eql(\"RECIPIENT_TOKEN_EXPIRED\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Token inexistente → 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/phone-transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "phone-transfers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{runSourceAccountId}}\",\n  \"recipientToken\": \"rt_no_existe\",\n  \"amount\": {\n    \"value\": \"45.50\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Almuerzo\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"code RECIPIENT_TOKEN_EXPIRED\", () => pm.expect(pm.response.json().code).to.eql(\"RECIPIENT_TOKEN_EXPIRED\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Resolver mi propio celular (cliente fijo)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{customerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/phone-transfers/recipients?phone={{phoneOwn}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "phone-transfers",
+                "recipients"
+              ],
+              "query": [
+                {
+                  "key": "phone",
+                  "value": "{{phoneOwn}}"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set(\"ownRecipientToken\", pm.response.json().recipientToken);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Pagarme a mí mismo → 422 SELF_TRANSFER",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{customerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/phone-transfers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "phone-transfers"
+              ]
+            },
+            "description": "Usa el cliente fijo CUST-000123: +51999111222 es de su cuenta 191-0001234567. El rechazo no suma al límite diario.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccountId\": \"{{sourceAccountId}}\",\n  \"recipientToken\": \"{{ownRecipientToken}}\",\n  \"amount\": {\n    \"value\": \"45.50\",\n    \"currency\": \"PEN\"\n  },\n  \"description\": \"Almuerzo\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"code SELF_TRANSFER\", () => pm.expect(pm.response.json().code).to.eql(\"SELF_TRANSFER\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Consultar el pago a celular → 200",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Customer-Id",
+                "value": "{{runCustomerId}}"
+              },
+              {
+                "key": "X-Correlation-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/transfers/{{phoneTransferId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "transfers",
+                "{{phoneTransferId}}"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"channel PHONE\", () => pm.expect(pm.response.json().channel).to.eql(\"PHONE\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "customerId",
+      "value": "CUST-000123"
+    },
+    {
+      "key": "otherCustomerId",
+      "value": "CUST-000999"
+    },
+    {
+      "key": "sourceAccountId",
+      "value": "191-0001234567"
+    },
+    {
+      "key": "targetAccountId",
+      "value": "191-0007654321"
+    },
+    {
+      "key": "creditFailsAccountId",
+      "value": "191-0009999999"
+    },
+    {
+      "key": "phonePragbank",
+      "value": "%2B51987654321"
+    },
+    {
+      "key": "phoneOwn",
+      "value": "%2B51999111222"
+    },
+    {
+      "key": "phoneOtherBank",
+      "value": "%2B51912345678"
+    },
+    {
+      "key": "runCustomerId",
+      "value": ""
+    },
+    {
+      "key": "runSourceAccountId",
+      "value": ""
+    },
+    {
+      "key": "poorAccountId",
+      "value": ""
+    },
+    {
+      "key": "dailyAccountId",
+      "value": ""
+    },
+    {
+      "key": "idempotencyKey",
+      "value": ""
+    },
+    {
+      "key": "transferId",
+      "value": ""
+    },
+    {
+      "key": "recipientToken",
+      "value": ""
+    },
+    {
+      "key": "phoneIdempotencyKey",
+      "value": ""
+    },
+    {
+      "key": "phoneTransferId",
+      "value": ""
+    },
+    {
+      "key": "ownRecipientToken",
+      "value": ""
+    }
+  ]
+}
