@@ -14,5 +14,7 @@ dependencies {
 
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)
+    testImplementation(libs.boot.starter.test)
+    testImplementation(libs.reactor.test)
     testRuntimeOnly(libs.junit.platform.launcher)
 }

@@ -150,9 +150,11 @@ tasks.register<JacocoReport>("jacocoRootReport") {
     additionalSourceDirs.setFrom(subprojects.map { it.sourceSets.main.get().allSource.srcDirs })
     sourceDirectories.setFrom(subprojects.map { it.sourceSets.main.get().allSource.srcDirs })
     classDirectories.setFrom(filteredClasses())
-    executionData.setFrom(subprojects.map {
+    // Se resuelve en ejecución (no en configuración): con `clean check` los .exec aún no existen
+    // al configurar y el reporte/gate quedaban SKIPPED.
+    executionData.setFrom(files(subprojects.map {
         it.layout.buildDirectory.file("jacoco/test.exec")
-    }.filter { it.get().asFile.exists() })
+    }).filter { it.exists() })
 
     reports {
         xml.required.set(true)
@@ -168,9 +170,11 @@ tasks.register<JacocoCoverageVerification>("jacocoRootCoverageVerification") {
 
     sourceDirectories.setFrom(subprojects.map { it.sourceSets.main.get().allSource.srcDirs })
     classDirectories.setFrom(filteredClasses())
-    executionData.setFrom(subprojects.map {
+    // Se resuelve en ejecución (no en configuración): con `clean check` los .exec aún no existen
+    // al configurar y el reporte/gate quedaban SKIPPED.
+    executionData.setFrom(files(subprojects.map {
         it.layout.buildDirectory.file("jacoco/test.exec")
-    }.filter { it.get().asFile.exists() })
+    }).filter { it.exists() })
 
     violationRules {
         rule {

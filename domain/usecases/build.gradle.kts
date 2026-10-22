@@ -8,6 +8,7 @@ dependencies {
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.mockito.core)
     testImplementation(libs.mockito.junit.jupiter)
+    testImplementation(libs.assertj.core)
     testImplementation(platform(libs.reactor.bom))
     testImplementation(libs.reactor.test)
     testRuntimeOnly(libs.junit.platform.launcher)

@@ -27,6 +27,7 @@ dependencies {
     testImplementation(libs.reactor.test)
     testImplementation(libs.blockhound)
     testImplementation(libs.archunit.junit5)
+    testImplementation(libs.wiremock.standalone)
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 
@@ -35,6 +36,8 @@ dependencies {
 // de tests (p.ej. el de integración que levanta el contexto reactivo completo).
 tasks.named<Test>("test") {
     setForkEvery(1)
+    // Las pruebas de integración levantan WireMock embebido con los stubs reales de mocks/.
+    systemProperty("mocks.dir", rootProject.file("mocks").absolutePath)
 }
 
 tasks.register<Test>("architectureTest") {

@@ -16,6 +16,10 @@ public class TechnicalException extends DomainException {
         super(code, message, metadata, cause);
     }
 
+    public TechnicalException(ErrorCatalog error, String message, Throwable cause) {
+        this(error.code(), message, cause);
+    }
+
     @Override
     public Kind kind() {
         return Kind.TECHNICAL;

@@ -24,5 +24,6 @@ dependencies {
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.boot.starter.test)
     testImplementation(libs.reactor.test)
+    testImplementation(libs.wiremock.standalone)
     testRuntimeOnly(libs.junit.platform.launcher)
 }

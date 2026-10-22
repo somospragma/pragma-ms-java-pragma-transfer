@@ -1,10 +1,19 @@
 spring:
   application:
     name: ${SERVICE_NAME:ms-transfers}
+  jackson:
+    deserialization:
+      # El contrato v1 declara additionalProperties: false en CreateTransferRequest.
+      fail-on-unknown-properties: true
 
 transfers:
   service-name: ${SERVICE_NAME:ms-transfers}
   max-page-size: 100
+  limits:
+    per-transaction: ${TRANSFER_LIMIT_PER_TX:10000.00}   # RN-04
+    daily: ${TRANSFER_LIMIT_DAILY:30000.00}              # RN-05
+    zone: ${TRANSFER_BUSINESS_ZONE:America/Lima}
+    idempotency-ttl: 24h                                 # RN-08
 
 server:
   port: ${SERVER_PORT:8080}
@@ -55,10 +64,13 @@ sns:
 core-banking:
   base-url: ${CORE_BASE_URL:http://localhost:9090}
   api-key: ${CORE_API_KEY:local-dev-key}
+  timeout: ${CORE_TIMEOUT:2s}
 
 fraud:
   base-url: ${FRAUD_BASE_URL:http://localhost:9091}
   api-key: ${FRAUD_API_KEY:local-dev-key}
+  # Contrato de antifraude: si no responde en 1 s la transferencia queda PENDING_REVIEW.
+  timeout: ${FRAUD_TIMEOUT:1s}
 
 resilience4j:
   circuitbreaker:
@@ -72,6 +84,9 @@ resilience4j:
         automaticTransitionFromOpenToHalfOpenEnabled: true
         waitDurationInOpenState: 30s
         failureRateThreshold: 50
+        # Los rechazos de negocio del core (saldo, cuenta bloqueada) no abren el circuito.
+        ignoreExceptions:
+          - co.com.pragma.transfers.model.exception.BusinessException
     instances:
       coreBanking:
         baseConfig: default
@@ -85,9 +100,9 @@ resilience4j:
         enableExponentialBackoff: true
         exponentialBackoffMultiplier: 2
         randomizedWaitFactor: 0.5
+        # Los adaptadores traducen timeouts, I/O y 5xx a TechnicalException.
         retryExceptions:
-          - java.io.IOException
-          - java.util.concurrent.TimeoutException
+          - co.com.pragma.transfers.model.exception.TechnicalException
     instances:
       # Solo consultas: los débitos y créditos no se reintentan a ciegas (los protege el operationId).
       coreBanking:

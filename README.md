@@ -2,7 +2,7 @@
 
 Microservicio de transferencias entre cuentas de **PragBank Perú**. Base: archetype de Pragma `java-webflux-gradle`, con la misma estructura hexagonal y los mismos quality gates.
 
-> **Estado: scaffold (HU-00).** Tiene la base transversal lista: errores RFC 7807, headers de seguridad, correlation id, health, clientes de DynamoDB/SNS/WebClient y quality gates. Las transferencias (endpoints, reglas RN-01 a RN-08 de [docs/business-rules.md](docs/business-rules.md), SAGA, eventos) se construyen en la **HU-01** con el contrato `openapi/ms-transfers-v1.yaml`.
+> **Estado: HU-01 implementada.** Endpoints de transferencias del contrato `openapi/ms-transfers-v1.yaml`, reglas RN-01 a RN-08 ([docs/business-rules.md](docs/business-rules.md)), SAGA débito → crédito con compensación, persistencia DynamoDB (tablas `transfers` e `idempotency`) y eventos SNS según `openapi/transfers-events.asyncapi.yaml`.
 
 ## Información general
 
@@ -22,7 +22,7 @@ Microservicio de transferencias entre cuentas de **PragBank Perú**. Base: arche
 | --- | --- | --- |
 | Git + llave SSH registrada en `dev.azure.com/your-ado-org` | — | `git clone git@ssh.dev.azure.com:v3/your-ado-org/workshop-peru/pragma-ms-java-pragma-transfer` |
 | JDK | 21 (Temurin) | `java -version` |
-| Docker Desktop (WireMock y Testcontainers) | 4.x encendido | `docker run --rm hello-world` |
+| Docker Desktop (opcional: WireMock en contenedor) | 4.x | `docker run --rm hello-world` |
 | IDE | IntelliJ IDEA o VS Code con Java | — |
 | curl o Bruno | — | `curl --version` |
 
@@ -42,9 +42,100 @@ curl -s http://localhost:8080/actuator/health/liveness
 curl -s http://localhost:9090/core/v1/accounts/191-0001234567
 ```
 
+## API (HU-01)
+
+Contrato: `openapi/ms-transfers-v1.yaml` (Swagger UI en `/swagger-ui.html`). Todas las rutas exigen el header `X-Customer-Id`; sin él responden 401 `UNAUTHORIZED`. `X-Correlation-Id` es opcional: si no llega se genera, se devuelve en la respuesta y se propaga a core, antifraude, logs y eventos.
+
+| Método y ruta | Headers | Respuestas |
+| --- | --- | --- |
+| `POST /api/v1/transfers` | `X-Customer-Id`, `Idempotency-Key` (UUID, obligatorio) | 201 (`COMPLETED`, `PENDING_REVIEW` o `COMPENSATED`) con `Location`; 200 repetición idempotente; 400, 401, 403, 409, 422, 503 |
+| `GET /api/v1/transfers/{transferId}` | `X-Customer-Id` | 200; 403 si es de otro cliente; 404 si no existe |
+| `GET /api/v1/accounts/{accountId}/transfers?page=0&size=20&status=&from=&to=` | `X-Customer-Id` | 200 página (más reciente primero, `size` máx. 100); 400; 403 si la cuenta no es del cliente |
+
+### Reglas y orden de evaluación del POST
+
+1. Forma de la petición (400): esquema del contrato, campos desconocidos rechazados, RN-03 monto `> 0` con máximo 2 decimales (`AMOUNT_INVALID`).
+2. RN-08 idempotencia: misma llave + mismo cuerpo → 200 con la transferencia original (sin nuevo cargo); cuerpo distinto → 409 `IDEMPOTENCY_KEY_REUSED`. La llave se reserva con escritura condicional y vence a las 24 h.
+3. La cuenta origen debe ser del cliente (403 `ACCOUNT_NOT_OWNED`; no se guarda nada).
+4. RN-04 máximo por operación (S/ 10,000.00) y RN-05 acumulado diario del cliente (S/ 30,000.00, día de negocio en `America/Lima`; suman RECEIVED, DEBITED, COMPLETED y PENDING_REVIEW).
+5. RN-01 cuentas existentes, activas y distintas (`ACCOUNT_INVALID`) y RN-02 misma moneda (`CURRENCY_MISMATCH`).
+6. RN-07 antifraude: `< 60` aprueba; `60-79`, timeout (1 s) o caída → `PENDING_REVIEW` sin débito; `>= 80` → 422 `FRAUD_REJECTED`.
+7. RN-06 saldo (`INSUFFICIENT_FUNDS`). Va después de antifraude porque `PENDING_REVIEW` no mueve dinero.
+8. SAGA: débito (`TRF-{id}-DEBIT`) → crédito (`TRF-{id}-CREDIT`). Si el crédito falla se reversa el débito (`TRF-{id}-REVERSAL`) y la transferencia queda `COMPENSATED` (201, `failureCode: CREDIT_FAILED`).
+
+Los rechazos de los pasos 4 a 7 se guardan como `REJECTED` con su `failureCode` y publican `TransferRejected`; repetir la misma llave devuelve el mismo 422. Si el core no responde (503 `DEPENDENCY_UNAVAILABLE` con `Retry-After`), la transferencia queda en `RECEIVED`/`DEBITED` y el reintento con la misma llave la retoma con los mismos `operationId` (antes consulta `GET /core/v1/operations/{operationId}` para saber si el débito se aplicó).
+
+### Eventos (SNS `transfers-events`)
+
+`TransferCompleted`, `TransferRejected`, `TransferPendingReview` y `TransferCompensated`, con el payload `TransferEvent` del AsyncAPI y los atributos de mensaje `eventType` y `correlationId`. Un fallo al publicar se registra en el log y no revierte la transferencia. Con `SNS_ENABLED=false` los eventos solo se escriben en el log.
+
+### Tablas DynamoDB
+
+| Tabla (variable) | Llave | Índices / TTL |
+| --- | --- | --- |
+| `transfers` (`DYNAMODB_TABLE_TRANSFERS`) | PK `transferId` (S) | GSI `sourceAccountId-createdAt-index` (PK `sourceAccountId`, SK `createdAt`) para el historial; GSI `customerDay-createdAt-index` (PK `customerDay` = `customerId#yyyy-MM-dd`, SK `createdAt`) para el límite diario |
+| `idempotency` (`DYNAMODB_TABLE_IDEMPOTENCY`) | PK `idempotencyKey` (S) | TTL en `expiresAt` (epoch en segundos, 24 h) |
+
+Con `DYNAMODB_ENABLED=false` (local y pruebas) se usan tablas en memoria: el servicio arranca sin AWS, pero los datos no son durables ni compartidos entre réplicas.
+
+### Resiliencia
+
+WebClient con timeout por llamada (core 2 s, antifraude 1 s) más timeouts de conexión y lectura, circuit breaker por dependencia (`coreBanking`, `fraud`; los rechazos de negocio no lo abren) y retry con backoff **solo en lecturas** (`GET` de cuentas y operaciones). Débitos, créditos y reversas no se reintentan a ciegas: los protege su `operationId`.
+
+## Cómo probar la HU-01 en local
+
+1. Levantar los mocks en el puerto 9090 (elige una opción):
+
+   ```bash
+   # Con Docker
+   docker run --rm -p 9090:8080 -v "$PWD/mocks:/home/wiremock" wiremock/wiremock:3.9.1
+   # Sin Docker (solo Java)
+   curl -sLO https://repo1.maven.org/maven2/org/wiremock/wiremock-standalone/3.13.2/wiremock-standalone-3.13.2.jar
+   java -jar wiremock-standalone-3.13.2.jar --port 9090 --root-dir mocks
+   ```
+
+2. Levantar el micro apuntando a los mocks (DynamoDB y SNS quedan en memoria):
+
+   ```bash
+   CORE_BASE_URL=http://localhost:9090 FRAUD_BASE_URL=http://localhost:9090 \
+     ./gradlew :application:app-service:bootRun
+   ```
+
+3. Probar los escenarios (datos de `mocks/README.md`):
+
+   ```bash
+   # Transferencia exitosa → 201 COMPLETED
+   KEY=$(uuidgen)
+   curl -si -X POST http://localhost:8080/api/v1/transfers \
+     -H 'Content-Type: application/json' -H 'X-Customer-Id: CUST-000123' -H "Idempotency-Key: $KEY" \
+     -d '{"sourceAccountId":"191-0001234567","targetAccountId":"191-0007654321","amount":{"value":"150.00","currency":"PEN"},"description":"Pago alquiler octubre"}'
+
+   # Mismo Idempotency-Key y mismo cuerpo → 200 con la transferencia original (un solo débito)
+   # Mismo Idempotency-Key con otro monto → 409 IDEMPOTENCY_KEY_REUSED
+
+   # Antifraude score 67 → 201 PENDING_REVIEW sin débito
+   curl -s -X POST http://localhost:8080/api/v1/transfers \
+     -H 'Content-Type: application/json' -H 'X-Customer-Id: CUST-000123' -H "Idempotency-Key: $(uuidgen)" \
+     -d '{"sourceAccountId":"191-0001234567","targetAccountId":"191-0007654321","amount":{"value":"9500.00","currency":"PEN"}}'
+
+   # Crédito falla → reversa → 201 COMPENSATED
+   curl -s -X POST http://localhost:8080/api/v1/transfers \
+     -H 'Content-Type: application/json' -H 'X-Customer-Id: CUST-000123' -H "Idempotency-Key: $(uuidgen)" \
+     -d '{"sourceAccountId":"191-0001234567","targetAccountId":"191-0009999999","amount":{"value":"200.00","currency":"PEN"}}'
+
+   # Saldo insuficiente (S/ 2,500 disponibles) → 422 INSUFFICIENT_FUNDS; 10000.01 → 422 LIMIT_PER_TX_EXCEEDED
+
+   # Consulta (200 propia, 403 con otro X-Customer-Id, 404 si no existe) e historial paginado
+   curl -s http://localhost:8080/api/v1/transfers/<transferId> -H 'X-Customer-Id: CUST-000123'
+   curl -s 'http://localhost:8080/api/v1/accounts/191-0001234567/transfers?page=0&size=20' -H 'X-Customer-Id: CUST-000123'
+   ```
+
+Las pruebas automáticas (`./gradlew check`) no necesitan Docker: los escenarios de aceptación (`TransfersAcceptanceTest`) levantan el servicio completo con WireMock embebido en la JVM usando los mismos stubs de `mocks/mappings`.
+
 ## Comandos
 
 ```bash
+./gradlew clean check                       # pruebas, ArchUnit y gate de cobertura (90 %), sin Docker
 ./gradlew build                             # compila, pruebas, ArchUnit y gate de cobertura
 ./gradlew jacocoRootReport                  # reporte de cobertura (build/reports/jacoco)
 ./gradlew :domain:usecases:pitest           # mutation testing del dominio
@@ -75,7 +166,7 @@ pragma-ms-java-pragma-transfer/
 
 ## Documentación de la API (Swagger)
 
-La especificación **se genera desde el código** con springdoc. Las rutas funcionales de WebFlux no se descubren solas: **cada ruta del router debe llevar su `@RouterOperation`** (headers, parámetros, cuerpo y respuestas) para aparecer en la spec.
+La especificación **se genera desde el código** con springdoc: cada ruta de `TransferRouter` lleva su `@RouterOperation` (headers, parámetros, cuerpo y respuestas). Las rutas funcionales de WebFlux no se descubren solas, así que **toda ruta nueva debe llevar su `@RouterOperation`**; `OpenApiDocsTest` verifica que aparezcan.
 
 - UI: `http://localhost:8080/swagger-ui.html` → definición *ms-transfers (generado desde el código)*. Botón **Authorize** para `x-api-key`.
 - Spec generada: `http://localhost:8080/v3/api-docs`.
@@ -98,6 +189,9 @@ La especificación **se genera desde el código** con springdoc. Las rutas funci
 | `DYNAMODB_TABLE_TRANSFERS` / `DYNAMODB_TABLE_IDEMPOTENCY` | Nombres de tablas | `transfers` / `idempotency` |
 | `SNS_ENABLED` / `SNS_TOPIC_ARN` | Publicación de eventos | `false` / vacío |
 | `CORE_BASE_URL` / `FRAUD_BASE_URL` | Dependencias externas | `http://localhost:9090` / `http://localhost:9091` |
+| `CORE_TIMEOUT` / `FRAUD_TIMEOUT` | Timeout por llamada | `2s` / `1s` |
+| `TRANSFER_LIMIT_PER_TX` / `TRANSFER_LIMIT_DAILY` | RN-04 y RN-05 | `10000.00` / `30000.00` |
+| `TRANSFER_BUSINESS_ZONE` | Zona del día de negocio (RN-05) | `America/Lima` |
 | `SECRET_APIS_NAME` | Secreto de Secrets Manager con las llaves; el micro lo lee al arrancar | vacío (no lee nada) |
 | `CORE_API_KEY` / `FRAUD_API_KEY` | **Secretos.** Salen del secreto `SECRET_APIS_NAME` | `local-dev-key` |
 
@@ -181,4 +275,11 @@ El task role necesita `secretsmanager:GetSecretValue` sobre el secreto y `kms:De
 
 - No usa `@RestController`, JPA, `RestTemplate`, `RestClient` ni Tomcat (reglas del stack WebFlux).
 - No se permiten llamadas `.block()` en producción (BlockHound lo verifica en tests).
-- DynamoDB y SNS se activan por bandera; el servicio arranca en local sin AWS.
+- DynamoDB y SNS se activan por bandera; el servicio arranca en local sin AWS (tablas y eventos en memoria).
+
+## Limitaciones conocidas (HU-01)
+
+- Sin Docker no se prueba contra DynamoDB ni SNS reales: los adaptadores se prueban con el SDK simulado (Mockito) y `AwsWiringTest` verifica que el contexto arma las tablas (con sus GSI) y el cliente SNS cuando las banderas están en `true`.
+- El historial lee todas las transferencias de la cuenta en el GSI y pagina en memoria (DynamoDB no tiene offset). Suficiente para el taller; con volumen real convendría paginar por cursor (`LastEvaluatedKey`).
+- Los eventos se publican después de guardar la transferencia, sin outbox: si SNS falla el evento se pierde (queda en el log).
+- Los límites RN-04/RN-05 se aplican en la moneda de la operación (no hay tipo de cambio).

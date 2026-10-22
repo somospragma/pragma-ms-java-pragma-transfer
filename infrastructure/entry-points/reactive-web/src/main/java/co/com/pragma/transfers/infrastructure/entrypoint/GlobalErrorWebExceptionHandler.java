@@ -2,10 +2,10 @@ package co.com.pragma.transfers.infrastructure.entrypoint;
 
 import co.com.pragma.transfers.infrastructure.helpers.CorrelationWebFilter;
 import co.com.pragma.transfers.model.exception.BusinessException;
-import co.com.pragma.transfers.model.exception.DomainException;
 import co.com.pragma.transfers.model.exception.ErrorCatalog;
 import co.com.pragma.transfers.model.exception.TechnicalException;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,25 +16,28 @@ import org.springframework.http.MediaType;
 import org.springframework.web.bind.support.WebExchangeBindException;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.server.ServerWebExchange;
+import org.springframework.web.server.ServerWebInputException;
 import org.springframework.web.server.WebExceptionHandler;
 import reactor.core.publisher.Mono;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Manejo de errores centralizado en formato RFC 7807 (Problem Details) con
- * extensiones de negocio (code, metadata) via el mecanismo de extension del RFC.
+ * Manejo de errores centralizado en formato RFC 9457 / 7807 (Problem Details)
+ * con las extensiones del contrato v1: {@code code}, {@code correlationId} y
+ * {@code errors[{field, message}]}.
  *
- * - Implementa WebExceptionHandler + @Order(-2) (API estable de Spring), NO
- *   @RestControllerAdvice (modelo MVC anotado).
- * - Separa errores de NEGOCIO (4xx) de TECNICOS (5xx) por el tipo de DomainException.
- * - Nunca expone internals (stack trace / mensaje tecnico) en 5xx: mensaje generico.
+ * - El status HTTP y el titulo salen de {@link ErrorCatalog} (codes del contrato).
+ * - Implementa WebExceptionHandler + @Order(-2), NO @RestControllerAdvice.
+ * - Separa errores de NEGOCIO (4xx) de TECNICOS (5xx): estos nunca exponen
+ *   internals; 503 DEPENDENCY_UNAVAILABLE agrega Retry-After.
  * - Jackson 3 (tools.jackson.*), default de Spring Boot 4.
  */
 @Order(-2)
 public class GlobalErrorWebExceptionHandler implements WebExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalErrorWebExceptionHandler.class);
-    private static final String TYPE_BASE = "https://errors.pragma.co/";
+    static final String TYPE_BASE = "https://api.pragbank.pe/errors/";
+    static final String RETRY_AFTER_SECONDS = "5";
 
     private final JsonMapper jsonMapper = JsonMapper.builder().build();
 
@@ -44,6 +47,9 @@ public class GlobalErrorWebExceptionHandler implements WebExceptionHandler {
         int status = (int) problem.get("status");
         exchange.getResponse().setStatusCode(HttpStatus.valueOf(status));
         exchange.getResponse().getHeaders().setContentType(MediaType.APPLICATION_PROBLEM_JSON);
+        if (status == HttpStatus.SERVICE_UNAVAILABLE.value()) {
+            exchange.getResponse().getHeaders().set("Retry-After", RETRY_AFTER_SECONDS);
+        }
 
         byte[] bytes = jsonMapper.writeValueAsBytes(problem);
         DataBuffer buffer = exchange.getResponse().bufferFactory().wrap(bytes);
@@ -52,67 +58,81 @@ public class GlobalErrorWebExceptionHandler implements WebExceptionHandler {
 
     private Map<String, Object> toProblem(Throwable error, ServerWebExchange exchange) {
         String path = exchange.getRequest().getPath().value();
-        String traceId = exchange.getAttributeOrDefault(CorrelationWebFilter.TRACE_ID, "");
+        String correlationId = exchange.getAttributeOrDefault(CorrelationWebFilter.TRACE_ID, "");
 
         if (error instanceof BusinessException be) {
-            HttpStatus status = statusForBusinessCode(be.code());
-            return problem(status, "Business rule violation", be.getMessage(), path,
-                be.code(), be.metadata(), traceId);
+            ErrorCatalog entry = ErrorCatalog.fromCode(be.code()).orElse(null);
+            int status = entry == null ? HttpStatus.UNPROCESSABLE_ENTITY.value() : entry.httpStatus();
+            String title = entry == null ? "Regla de negocio incumplida" : entry.title();
+            return problem(status, title, be.getMessage(), path, be.code(), be.metadata(), correlationId);
         }
         if (error instanceof WebExchangeBindException bind) {
-            Map<String, Object> meta = new LinkedHashMap<>();
-            bind.getFieldErrors().forEach(fe -> meta.put(fe.getField(), fe.getDefaultMessage()));
-            return problem(HttpStatus.BAD_REQUEST, "Validation error",
-                ErrorCatalog.VALIDATION_ERROR.defaultMessage(), path,
-                ErrorCatalog.VALIDATION_ERROR.code(), meta, traceId);
+            Map<String, Object> fields = new LinkedHashMap<>();
+            bind.getFieldErrors().forEach(fe -> fields.put(fe.getField(), fe.getDefaultMessage()));
+            return catalog(ErrorCatalog.VALIDATION_ERROR, null, path, fields, correlationId);
         }
-        if (error instanceof IllegalArgumentException iae) {
-            return problem(HttpStatus.BAD_REQUEST, "Invalid request", iae.getMessage(), path,
-                ErrorCatalog.VALIDATION_ERROR.code(), Map.of(), traceId);
+        if (error instanceof ServerWebInputException) {
+            // Cuerpo ilegible, campos desconocidos o tipos incorrectos: no se expone el detalle del parser.
+            return catalog(ErrorCatalog.VALIDATION_ERROR, "El cuerpo de la petición no es válido", path,
+                Map.of(), correlationId);
         }
         if (error instanceof ResponseStatusException rse) {
-            HttpStatus status = HttpStatus.valueOf(rse.getStatusCode().value());
-            return problem(status, status.getReasonPhrase(), rse.getReason(), path,
-                "TRF-" + status.value() + "-000", Map.of(), traceId);
+            return fromStatus(rse, path, correlationId);
         }
-
+        if (error instanceof IllegalArgumentException iae) {
+            return catalog(ErrorCatalog.VALIDATION_ERROR, iae.getMessage(), path, Map.of(), correlationId);
+        }
         // Errores tecnicos y no controlados: NUNCA exponer internals al cliente.
         if (error instanceof TechnicalException te) {
-            log.error("Technical error [{}] traceId={}", te.code(), traceId, te);
-            return problem(HttpStatus.INTERNAL_SERVER_ERROR, "Internal server error",
-                ErrorCatalog.UNEXPECTED_ERROR.defaultMessage(), path, te.code(), Map.of(), traceId);
+            ErrorCatalog entry = ErrorCatalog.fromCode(te.code())
+                .filter(e -> e.httpStatus() >= 500)
+                .orElse(ErrorCatalog.UNEXPECTED_ERROR);
+            log.error("Technical error [{}] correlationId={}", te.code(), correlationId, te);
+            return catalog(entry, null, path, Map.of(), correlationId);
         }
-        log.error("Unhandled error traceId={}", traceId, error);
-        return problem(HttpStatus.INTERNAL_SERVER_ERROR, "Internal server error",
-            ErrorCatalog.UNEXPECTED_ERROR.defaultMessage(), path,
-            ErrorCatalog.UNEXPECTED_ERROR.code(), Map.of(), traceId);
+        log.error("Unhandled error correlationId={}", correlationId, error);
+        return catalog(ErrorCatalog.UNEXPECTED_ERROR, null, path, Map.of(), correlationId);
     }
 
-    private HttpStatus statusForBusinessCode(String code) {
-        // El code de negocio embebe el status HTTP: TRF-<status>-<seq>.
-        try {
-            String[] parts = code.split("-");
-            return HttpStatus.valueOf(Integer.parseInt(parts[1]));
-        } catch (RuntimeException e) {
-            return HttpStatus.UNPROCESSABLE_ENTITY;
+    private Map<String, Object> fromStatus(ResponseStatusException rse, String path, String correlationId) {
+        int status = rse.getStatusCode().value();
+        ErrorCatalog entry;
+        if (status == HttpStatus.NOT_FOUND.value()) {
+            entry = ErrorCatalog.ROUTE_NOT_FOUND;
+        } else if (status >= 500) {
+            entry = ErrorCatalog.UNEXPECTED_ERROR;
+        } else {
+            entry = ErrorCatalog.VALIDATION_ERROR;
         }
+        String detail = status >= 500 ? null : rse.getReason();
+        return problem(status, entry.title(), detail == null ? entry.defaultMessage() : detail, path,
+            entry.code(), Map.of(), correlationId);
     }
 
-    private Map<String, Object> problem(HttpStatus status, String title, String detail, String path,
-                                        String code, Map<String, Object> metadata, String traceId) {
+    private Map<String, Object> catalog(ErrorCatalog entry, String detail, String path,
+                                        Map<String, Object> fields, String correlationId) {
+        return problem(entry.httpStatus(), entry.title(), detail == null ? entry.defaultMessage() : detail,
+            path, entry.code(), fields, correlationId);
+    }
+
+    private Map<String, Object> problem(int status, String title, String detail, String path, String code,
+                                        Map<String, Object> fields, String correlationId) {
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("type", TYPE_BASE + code);
+        body.put("type", TYPE_BASE + ErrorCatalog.fromCode(code).map(ErrorCatalog::slug).orElse("business-rule"));
         body.put("title", title);
-        body.put("status", status.value());
+        body.put("status", status);
+        // Extensiones del contrato (mecanismo de extension del propio RFC):
+        body.put("code", code);
         body.put("detail", detail == null ? title : detail);
         body.put("instance", path);
-        // Extensiones RFC 7807 (mecanismo de extension del propio RFC):
-        body.put("code", code);
-        if (!traceId.isBlank()) {
-            body.put("traceId", traceId);
+        if (!correlationId.isBlank()) {
+            body.put("correlationId", correlationId);
         }
-        if (metadata != null && !metadata.isEmpty()) {
-            body.put("metadata", metadata);
+        if (fields != null && !fields.isEmpty()) {
+            List<Map<String, Object>> errors = fields.entrySet().stream()
+                .map(e -> Map.<String, Object>of("field", e.getKey(), "message", String.valueOf(e.getValue())))
+                .toList();
+            body.put("errors", errors);
         }
         return body;
     }
