@@ -1,0 +1,19 @@
+{
+  "name": "antifraude · S/ 9,500.00 da score 67 (PENDING_REVIEW)",
+  "priority": 1,
+  "request": {
+    "method": "POST",
+    "url": "/fraud/v1/score",
+    "bodyPatterns": [{ "matchesJsonPath": "$[?(@.amount.value == '9500.00')]" }]
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "transformers": ["response-template"],
+    "jsonBody": {
+      "operationId": "{{jsonPath request.body '$.operationId'}}",
+      "score": 67,
+      "reasons": ["AMOUNT_ABOVE_CUSTOMER_AVERAGE"]
+    }
+  }
+}

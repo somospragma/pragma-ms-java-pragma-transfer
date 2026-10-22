@@ -1,0 +1,10 @@
+{
+  "name": "core · el crédito a 191-0009999999 falla (dispara la reversa)",
+  "priority": 1,
+  "request": { "method": "POST", "url": "/core/v1/accounts/191-0009999999/credits" },
+  "response": {
+    "status": 503,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": { "code": "CORE_UNAVAILABLE", "message": "Core no disponible" }
+  }
+}

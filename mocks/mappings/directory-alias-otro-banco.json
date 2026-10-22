@@ -1,0 +1,9 @@
+{
+  "name": "directorio · +51912345678 es de otro banco (RECIPIENT_NOT_SUPPORTED)",
+  "request": { "method": "GET", "url": "/directory/v1/aliases/+51912345678" },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": { "phone": "+51912345678", "bank": "OTHER", "status": "ACTIVE" }
+  }
+}

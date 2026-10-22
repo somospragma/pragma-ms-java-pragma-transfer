@@ -1,0 +1,61 @@
+openapi: 3.1.0
+info:
+  title: PragBank · Directorio de alias por celular (mock)
+  version: 1.0.0
+  description: |
+    Resuelve un celular a la cuenta de su titular. Se agrega en la charla 3 (Pago a celular).
+    La respuesta contiene datos sensibles (cuenta, nombre completo) que `ms-transfers` nunca expone al cliente.
+servers:
+  - url: http://localhost:9092
+  - url: http://mocks.pragbank.local:8080
+paths:
+  /directory/v1/aliases/{phone}:
+    get:
+      operationId: getAlias
+      summary: Resolver celular
+      parameters:
+        - name: phone
+          in: path
+          required: true
+          schema: { type: string, pattern: '^\+519\d{8}$' }
+          example: "+51987654321"
+        - name: X-Correlation-Id
+          in: header
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Alias encontrado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alias'
+              examples:
+                pragbank:
+                  value:
+                    phone: "+51987654321"
+                    bank: PRAGBANK
+                    accountId: "191-0007654321"
+                    holderName: Mario Quiroz
+                    status: ACTIVE
+                otroBanco:
+                  value:
+                    phone: "+51912345678"
+                    bank: OTHER
+                    status: ACTIVE
+        '404':
+          description: Celular no afiliado.
+components:
+  schemas:
+    Alias:
+      type: object
+      required: [phone, bank, status]
+      properties:
+        phone: { type: string }
+        bank: { type: string, enum: [PRAGBANK, OTHER] }
+        accountId:
+          type: string
+          description: Solo presente cuando `bank` es PRAGBANK.
+        holderName:
+          type: string
+          description: Solo presente cuando `bank` es PRAGBANK.
+        status: { type: string, enum: [ACTIVE, SUSPENDED] }

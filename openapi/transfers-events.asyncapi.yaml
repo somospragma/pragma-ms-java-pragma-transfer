@@ -1,0 +1,58 @@
+asyncapi: 3.0.0
+info:
+  title: PragBank · Eventos de ms-transfers
+  version: 1.1.0
+  description: Eventos de dominio publicados en SNS `transfers-events` y entregados a SQS `notifications`.
+channels:
+  transfersEvents:
+    address: transfers-events
+    messages:
+      TransferCompleted: { $ref: '#/components/messages/TransferCompleted' }
+      TransferRejected: { $ref: '#/components/messages/TransferRejected' }
+      TransferPendingReview: { $ref: '#/components/messages/TransferPendingReview' }
+      TransferCompensated: { $ref: '#/components/messages/TransferCompensated' }
+operations:
+  publishTransferEvents:
+    action: send
+    channel: { $ref: '#/channels/transfersEvents' }
+components:
+  messages:
+    TransferCompleted:
+      headers: { $ref: '#/components/schemas/EventHeaders' }
+      payload: { $ref: '#/components/schemas/TransferEvent' }
+    TransferRejected:
+      headers: { $ref: '#/components/schemas/EventHeaders' }
+      payload: { $ref: '#/components/schemas/TransferEvent' }
+    TransferPendingReview:
+      headers: { $ref: '#/components/schemas/EventHeaders' }
+      payload: { $ref: '#/components/schemas/TransferEvent' }
+    TransferCompensated:
+      headers: { $ref: '#/components/schemas/EventHeaders' }
+      payload: { $ref: '#/components/schemas/TransferEvent' }
+  schemas:
+    EventHeaders:
+      type: object
+      properties:
+        eventType:
+          type: string
+          description: Atributo de mensaje SNS usado para filtrar suscripciones.
+        correlationId: { type: string, format: uuid }
+    TransferEvent:
+      type: object
+      required: [eventId, eventType, transferId, customerId, channel, amount, occurredAt, correlationId]
+      properties:
+        eventId: { type: string, format: uuid }
+        eventType:
+          type: string
+          enum: [TransferCompleted, TransferRejected, TransferPendingReview, TransferCompensated]
+        transferId: { type: string, format: uuid }
+        customerId: { type: string }
+        channel: { type: string, enum: [ACCOUNT, PHONE] }
+        amount:
+          type: object
+          properties:
+            value: { type: string }
+            currency: { type: string, enum: [PEN, USD] }
+        failureCode: { type: string }
+        occurredAt: { type: string, format: date-time }
+        correlationId: { type: string, format: uuid }

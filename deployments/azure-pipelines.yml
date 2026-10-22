@@ -1,0 +1,325 @@
+######################################################################
+# Pipeline — pragma-ms-java-pragma-transfer (ms-transfers, ECS Fargate)
+#
+# Stages:
+#   1. Quality    — build, pruebas, ArchUnit y cobertura      [solo con runQualityGates=true]
+#   2. Security   — secret scan (gitleaks)                      [solo con runQualityGates=true]
+#   3. Build      — imágenes del micro y de mocks a sus ECR con tag latest (main, NO en PRs)
+#   4. Secrets DEV — secretos de la library a Secrets Manager (main)
+#   5. Restart DEV — reinicio de los servicios ms-transfers y mocks para que tomen :latest (main)
+#
+# Las tareas de ECS siempre usan la imagen :latest. Desplegar = subir las imágenes
+# y reiniciar las tareas (update-service --force-new-deployment) para que las tomen.
+#
+# Acceso a AWS: cada tarea entra con la service connection $(AWS_SERVICE_CONNECTION)
+# y asume $(AWS_DEPLOY_ROLE) con un perfil del AWS CLI (role_arn) usado con --profile.
+# El script no maneja llaves: el CLI hace el assume-role. Ambos valores vienen de la library.
+#
+# Modo taller: Quality y Security están desactivados por defecto para que el
+# despliegue sea rápido (no se borran). Para correrlos: Run pipeline ->
+# marcar "Correr Quality y Security". Estrategia completa: docs/deployment-strategy.md
+#
+# Library requerida: pragma-ms-java-pragma-transfer (ver README.md)
+# Ruta del YAML al registrar el pipeline: /deployments/azure-pipelines.yml
+######################################################################
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      - README.md
+      - docs/*
+      - mocks/README.md
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      - README.md
+      - docs/*
+      - mocks/README.md
+
+parameters:
+  - name: runQualityGates
+    displayName: 'Correr Quality y Security (build, pruebas, cobertura y gitleaks)'
+    type: boolean
+    default: false
+
+variables:
+  - group: 'pragma-ms-java-pragma-transfer'
+  - name: ENVIRONMENT
+    value: 'dev'
+  - name: IMAGE_TAG
+    value: '$(Build.BuildId)'
+
+stages:
+
+- ${{ if eq(parameters.runQualityGates, true) }}:
+  ######################################################################
+  # Stage 1: Quality (PR gate — solo con runQualityGates=true)
+  ######################################################################
+  - stage: Quality
+    displayName: 'Quality'
+    jobs:
+    - job: BuildTest
+      displayName: 'Build + Test (Gradle)'
+      pool:
+        vmImage: 'ubuntu-latest'
+      steps:
+      - task: JavaToolInstaller@0
+        displayName: 'Install JDK 21'
+        inputs:
+          versionSpec: '21'
+          jdkArchitectureOption: 'x64'
+          jdkSourceOption: 'PreInstalled'
+
+      # build incluye check: pruebas, ArchUnit y gate de cobertura del 90 % (JaCoCo)
+      - script: ./gradlew clean build --no-daemon
+        displayName: 'Build, test, ArchUnit and coverage gate'
+
+      - task: PublishTestResults@2
+        displayName: 'Publish test results'
+        condition: succeededOrFailed()
+        inputs:
+          testResultsFormat: 'JUnit'
+          testResultsFiles: '**/build/test-results/test/TEST-*.xml'
+          mergeTestResults: true
+
+      - task: PublishCodeCoverageResults@2
+        displayName: 'Publish coverage report'
+        condition: succeededOrFailed()
+        inputs:
+          summaryFileLocation: '$(Build.SourcesDirectory)/build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml'
+
+  ######################################################################
+  # Stage 2: Security (PR gate — solo con runQualityGates=true)
+  ######################################################################
+  - stage: Security
+    displayName: 'Security'
+    dependsOn: []
+    jobs:
+    - job: SecretScan
+      displayName: 'Secret Scan (gitleaks)'
+      pool:
+        vmImage: 'ubuntu-latest'
+      steps:
+      - script: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.22.1/gitleaks_8.22.1_linux_x64.tar.gz \
+            | tar -xz -C /usr/local/bin gitleaks
+        displayName: 'Install gitleaks'
+
+      - script: gitleaks detect --source . --no-git
+        displayName: 'Run gitleaks'
+
+######################################################################
+# Stage 3: Build image + push to ECR (main only, NOT PRs)
+######################################################################
+- stage: Build
+  displayName: 'Build Image'
+  dependsOn:
+    - ${{ if eq(parameters.runQualityGates, true) }}:
+      - Quality
+      - Security
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - job: BuildPushImage
+    displayName: 'Docker build + push to ECR'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    # Nombres de recursos y URLs de la library dentro de application.yml, antes de construir la imagen.
+    # Las llaves de las APIs no: el micro las lee del secreto SECRET_APIS_NAME al arrancar.
+    - script: python3 deployments/scripts/render-config.py application/app-service/src/main/resources/application.yml
+      displayName: 'Library values into application.yml'
+
+    - script: docker build -t "$(ECR_REPOSITORY):$(IMAGE_TAG)" .
+      displayName: 'Docker build (ms-transfers)'
+
+    # WireMock con los stubs de mocks/mappings; en dev corre como servicio ECS
+    - script: docker build -t "$(ECR_MOCKS_REPOSITORY):$(IMAGE_TAG)" mocks
+      displayName: 'Docker build (mocks)'
+
+    - task: AWSShellScript@1
+      displayName: 'Push images to ECR'
+      inputs:
+        awsCredentials: '$(AWS_SERVICE_CONNECTION)'
+        regionName: '$(AWS_REGION)'
+        scriptType: 'inline'
+        inlineScript: |
+          set -euo pipefail
+          echo ">>> Assuming deploy role"
+          aws configure set role_arn "$(AWS_DEPLOY_ROLE)" --profile deploy
+          aws configure set credential_source Environment --profile deploy
+          aws configure set role_session_name "pipeline-push-image" --profile deploy
+          # --profile tiene prioridad sobre las credenciales que la tarea deja en el entorno;
+          # AWS_PROFILE no (el CLI usaría el rol de la service connection).
+          aws() { command aws --profile deploy "$@"; }
+          echo ">>> Identity: $(aws sts get-caller-identity --query Arn --output text)"
+
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY="${ACCOUNT_ID}.dkr.ecr.$(AWS_REGION).amazonaws.com"
+
+          echo ">>> Login to ECR"
+          aws ecr get-login-password --region "$(AWS_REGION)" \
+            | docker login --username AWS --password-stdin "$REGISTRY"
+
+          for REPO in "$(ECR_REPOSITORY)" "$(ECR_MOCKS_REPOSITORY)"; do
+            for TAG in "$(IMAGE_TAG)" latest; do
+              echo ">>> Pushing $REPO:$TAG"
+              docker tag "$REPO:$(IMAGE_TAG)" "$REGISTRY/$REPO:$TAG"
+              docker push "$REGISTRY/$REPO:$TAG"
+            done
+          done
+
+######################################################################
+# Stage 4: Secrets DEV (depends: Build, condition: main)
+######################################################################
+- stage: SecretsDev
+  displayName: 'Secrets DEV'
+  dependsOn: Build
+  # Se salta mientras la library no tenga SECRET_APIS_NAME (antes del primer apply de la HU-02)
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['SECRET_APIS_NAME'], ''))
+  jobs:
+  - deployment: InjectSecretsDev
+    displayName: 'Inject secrets (DEV)'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'dev'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AWSShellScript@1
+            displayName: 'Inject secrets into Secrets Manager'
+            inputs:
+              awsCredentials: '$(AWS_SERVICE_CONNECTION)'
+              regionName: '$(AWS_REGION)'
+              scriptType: 'inline'
+              inlineScript: |
+                set -euo pipefail
+                echo ">>> Assuming deploy role"
+                aws configure set role_arn "$(AWS_DEPLOY_ROLE)" --profile deploy
+                aws configure set credential_source Environment --profile deploy
+                aws configure set role_session_name "pipeline-deploy-secrets" --profile deploy
+                # --profile tiene prioridad sobre las credenciales que la tarea deja en el entorno;
+                # AWS_PROFILE no (el CLI usaría el rol de la service connection).
+                aws() { command aws --profile deploy "$@"; }
+                echo ">>> Identity: $(aws sts get-caller-identity --query Arn --output text)"
+
+                # Antes del primer apply de la HU-02 el secreto no existe: se avisa y se sigue.
+                if ! aws secretsmanager describe-secret --secret-id "$(SECRET_APIS_NAME)" --region "$(AWS_REGION)" > /dev/null 2>&1; then
+                  echo "##vso[task.logissue type=warning]El secreto '$(SECRET_APIS_NAME)' no existe todavía (falta el apply de la HU-02 o el valor de SECRET_APIS_NAME en la library). Se omite."
+                  exit 0
+                fi
+
+                # Un secreto que no exista en la library llega como el texto literal "$(NOMBRE)" y se omite.
+                echo ">>> Building app secret"
+                SECRET_JSON='{}'
+                for NAME in CORE_API_KEY FRAUD_API_KEY DIRECTORY_API_KEY; do
+                  VALUE="${!NAME:-}"
+                  if [[ -z "$VALUE" || "$VALUE" == '$('* ]]; then
+                    echo "Omitido: $NAME no está en la library"
+                    continue
+                  fi
+                  SECRET_JSON=$(jq -c --arg k "$NAME" --arg v "$VALUE" '. + {($k): $v}' <<< "$SECRET_JSON")
+                  echo "Incluido: $NAME"
+                done
+
+                aws secretsmanager put-secret-value \
+                  --secret-id "$(SECRET_APIS_NAME)" \
+                  --secret-string "$SECRET_JSON" \
+                  --region "$(AWS_REGION)" > /dev/null
+                echo ">>> $(SECRET_APIS_NAME) updated"
+            # Los secretos de una library NO llegan solos al entorno: se mapean uno por uno.
+            env:
+              CORE_API_KEY: $(CORE_API_KEY)
+              FRAUD_API_KEY: $(FRAUD_API_KEY)
+              DIRECTORY_API_KEY: $(DIRECTORY_API_KEY)
+
+######################################################################
+# Stage 5: Restart ECS tasks DEV (depends: SecretsDev, condition: main)
+######################################################################
+- stage: RestartDev
+  displayName: 'Restart ECS DEV'
+  dependsOn: SecretsDev
+  # Se salta mientras la library no tenga ECS_CLUSTER y ECS_SERVICE (antes del primer apply de la HU-02)
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['ECS_CLUSTER'], ''), ne(variables['ECS_SERVICE'], ''))
+  jobs:
+  - deployment: RestartEcsTasksDev
+    displayName: 'Restart ECS tasks (DEV)'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'dev'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: none
+
+          - task: AWSShellScript@1
+            displayName: 'Restart mocks and ms-transfers to pull :latest'
+            inputs:
+              awsCredentials: '$(AWS_SERVICE_CONNECTION)'
+              regionName: '$(AWS_REGION)'
+              scriptType: 'inline'
+              inlineScript: |
+                set -euo pipefail
+                echo ">>> Assuming deploy role"
+                aws configure set role_arn "$(AWS_DEPLOY_ROLE)" --profile deploy
+                aws configure set credential_source Environment --profile deploy
+                aws configure set role_session_name "pipeline-restart-ecs" --profile deploy
+                # --profile tiene prioridad sobre las credenciales que la tarea deja en el entorno;
+                # AWS_PROFILE no (el CLI usaría el rol de la service connection).
+                aws() { command aws --profile deploy "$@"; }
+                echo ">>> Identity: $(aws sts get-caller-identity --query Arn --output text)"
+
+                # Antes del primer apply de la HU-02 el servicio no existe: se avisa y se sigue.
+                # (describe-services: role-app tiene ese permiso; describe-clusters no)
+                STATUS=$(aws ecs describe-services --cluster "$(ECS_CLUSTER)" --services "$(ECS_SERVICE)" --region "$(AWS_REGION)" --query 'services[0].status' --output text 2>/dev/null || true)
+                if [[ "$STATUS" != "ACTIVE" ]]; then
+                  echo "##vso[task.logissue type=warning]El servicio '$(ECS_SERVICE)' del cluster '$(ECS_CLUSTER)' no existe todavía (falta el apply de la HU-02 o los valores en la library). Se omite el reinicio."
+                  exit 0
+                fi
+
+                # Las tareas nuevas descargan :latest (y el micro relee los secretos)
+                for SERVICE in "$(ECS_MOCKS_SERVICE)" "$(ECS_SERVICE)"; do
+                  echo ">>> Restarting $SERVICE in $(ECS_CLUSTER)"
+                  aws ecs update-service \
+                    --cluster "$(ECS_CLUSTER)" \
+                    --service "$SERVICE" \
+                    --force-new-deployment \
+                    --region "$(AWS_REGION)" > /dev/null
+                done
+
+                # Espera con avance cada 15 s (máx. 15 min). Termina cuando la tarea nueva de cada
+                # servicio está corriendo y la vieja ya no recibe tráfico; el drenaje del target
+                # group (deregistration_delay) sigue en segundo plano y no bloquea el pipeline.
+                DEADLINE=$(( $(date +%s) + 900 ))
+                while true; do
+                  PENDING=0
+                  for SERVICE in "$(ECS_MOCKS_SERVICE)" "$(ECS_SERVICE)"; do
+                    read -r ROLLOUT NEW_RUNNING DESIRED OLD_RUNNING < <(aws ecs describe-services \
+                      --cluster "$(ECS_CLUSTER)" --services "$SERVICE" --region "$(AWS_REGION)" \
+                      --query 'services[0].[deployments[?status==`PRIMARY`]|[0].rolloutState, deployments[?status==`PRIMARY`]|[0].runningCount, desiredCount, sum(deployments[?status!=`PRIMARY`].runningCount)]' \
+                      --output text)
+                    echo ">>> $SERVICE: rollout=$ROLLOUT nuevas=$NEW_RUNNING/$DESIRED viejas=$OLD_RUNNING"
+                    if [[ "$ROLLOUT" == "FAILED" ]]; then
+                      echo "##vso[task.logissue type=error]El despliegue de $SERVICE falló (revisar eventos del servicio y logs de la tarea)."
+                      exit 1
+                    fi
+                    if [[ "$ROLLOUT" != "COMPLETED" && ( "$NEW_RUNNING" != "$DESIRED" || "$OLD_RUNNING" != "0" ) ]]; then
+                      PENDING=1
+                    fi
+                  done
+                  [[ $PENDING -eq 0 ]] && break
+                  if (( $(date +%s) > DEADLINE )); then
+                    echo "##vso[task.logissue type=error]Los servicios no quedaron estables en 15 minutos."
+                    exit 1
+                  fi
+                  sleep 15
+                done
+                echo ">>> Deploy DEV completed: $(ECS_MOCKS_SERVICE) and $(ECS_SERVICE) running the new :latest"

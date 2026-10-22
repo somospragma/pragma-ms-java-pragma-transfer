@@ -1,0 +1,11 @@
+{
+  "name": "antifraude · riesgo bajo por defecto (aprueba)",
+  "priority": 10,
+  "request": { "method": "POST", "url": "/fraud/v1/score" },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "transformers": ["response-template"],
+    "jsonBody": { "operationId": "{{jsonPath request.body '$.operationId'}}", "score": 12, "reasons": [] }
+  }
+}

@@ -1,0 +1,240 @@
+openapi: 3.1.0
+info:
+  title: PragBank · Core bancario (mock)
+  version: 1.0.0
+  description: |
+    Contrato del core bancario que consume `ms-transfers`. En el taller corre como mock con WireMock.
+    El core es dueño de cuentas y saldos. Débitos, créditos y reversas son idempotentes por `operationId`.
+servers:
+  - url: http://localhost:9090
+    description: WireMock local (Testcontainers)
+  - url: http://mocks.pragbank.local:8080
+    description: WireMock en ECS (Cloud Map)
+security:
+  - mTLSorApiKey: []
+paths:
+  /core/v1/accounts/{accountId}:
+    get:
+      operationId: getAccount
+      summary: Consultar cuenta y saldo disponible
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Cuenta encontrada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+              example:
+                accountId: "191-0001234567"
+                customerId: "CUST-000123"
+                holderName: María Quispe
+                status: ACTIVE
+                currency: PEN
+                availableBalance: { value: "2500.00", currency: PEN }
+        '404':
+          $ref: '#/components/responses/Error'
+  /core/v1/accounts/{accountId}/debits:
+    post:
+      operationId: postDebit
+      summary: Debitar una cuenta
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PostingRequest'
+            example:
+              operationId: "TRF-8f3c1a2e-DEBIT"
+              amount: { value: "150.00", currency: PEN }
+              reference: Transferencia 8f3c1a2e
+      responses:
+        '201':
+          description: Débito registrado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Posting'
+        '200':
+          description: El `operationId` ya existía; devuelve el movimiento original.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Posting'
+        '422':
+          description: Saldo insuficiente o cuenta bloqueada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoreError'
+              example:
+                code: INSUFFICIENT_FUNDS
+                message: Saldo disponible insuficiente
+        '503':
+          $ref: '#/components/responses/Error'
+  /core/v1/accounts/{accountId}/credits:
+    post:
+      operationId: postCredit
+      summary: Acreditar una cuenta
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PostingRequest'
+      responses:
+        '201':
+          description: Crédito registrado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Posting'
+        '200':
+          description: El `operationId` ya existía; devuelve el movimiento original.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Posting'
+        '422':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+  /core/v1/debits/{debitId}/reversal:
+    post:
+      operationId: reverseDebit
+      summary: Reversar un débito (compensación de la SAGA)
+      parameters:
+        - name: debitId
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operationId, reason]
+              properties:
+                operationId:
+                  type: string
+                  example: "TRF-8f3c1a2e-REVERSAL"
+                reason:
+                  type: string
+                  example: CREDIT_FAILED
+      responses:
+        '201':
+          description: Reversa registrada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Posting'
+        '200':
+          description: La reversa ya existía.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Posting'
+        '503':
+          $ref: '#/components/responses/Error'
+  /core/v1/operations/{operationId}:
+    get:
+      operationId: getOperation
+      summary: Consultar un movimiento por operationId
+      description: Se usa tras un timeout para saber si un débito se aplicó, en lugar de reintentar a ciegas.
+      parameters:
+        - name: operationId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Movimiento encontrado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Posting'
+        '404':
+          $ref: '#/components/responses/Error'
+components:
+  securitySchemes:
+    mTLSorApiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: En el mock se acepta cualquier valor; en un core real sería mTLS o credenciales de servicio.
+  parameters:
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      schema: { type: string, pattern: '^\d{3}-\d{10}$' }
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      schema: { type: string, format: uuid }
+  schemas:
+    Money:
+      type: object
+      required: [value, currency]
+      properties:
+        value: { type: string, pattern: '^\d{1,12}(\.\d{1,2})?$' }
+        currency: { type: string, enum: [PEN, USD] }
+    Account:
+      type: object
+      required: [accountId, customerId, holderName, status, currency, availableBalance]
+      properties:
+        accountId: { type: string }
+        customerId: { type: string }
+        holderName: { type: string }
+        status: { type: string, enum: [ACTIVE, BLOCKED, CLOSED] }
+        currency: { type: string, enum: [PEN, USD] }
+        availableBalance:
+          $ref: '#/components/schemas/Money'
+    PostingRequest:
+      type: object
+      required: [operationId, amount]
+      properties:
+        operationId:
+          type: string
+          description: Llave de idempotencia del movimiento.
+        amount:
+          $ref: '#/components/schemas/Money'
+        reference:
+          type: string
+          maxLength: 140
+    Posting:
+      type: object
+      required: [postingId, operationId, type, status, amount, postedAt]
+      properties:
+        postingId: { type: string, example: "DBT-20261015-000981" }
+        operationId: { type: string }
+        type: { type: string, enum: [DEBIT, CREDIT, REVERSAL] }
+        status: { type: string, enum: [POSTED, REVERSED] }
+        amount:
+          $ref: '#/components/schemas/Money'
+        postedAt: { type: string, format: date-time }
+    CoreError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [ACCOUNT_NOT_FOUND, ACCOUNT_BLOCKED, INSUFFICIENT_FUNDS, OPERATION_NOT_FOUND, CORE_UNAVAILABLE]
+        message: { type: string }
+  responses:
+    Error:
+      description: Error del core.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/CoreError'

@@ -1,0 +1,129 @@
+spring:
+  application:
+    name: ${SERVICE_NAME:ms-transfers}
+
+transfers:
+  service-name: ${SERVICE_NAME:ms-transfers}
+  max-page-size: 100
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+  netty:
+    connection-timeout: 30s
+    idle-timeout: 60s
+    max-initial-line-length: 8192
+    max-header-size: 16384
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
+  health:
+    readinessstate:
+      enabled: true
+    livenessstate:
+      enabled: true
+
+# Llaves de las APIs: al arrancar el micro lee el secreto SECRET_APIS_NAME con el task role
+# (ApiKeysSecretEnvironmentPostProcessor). Sin secreto o sin acceso, usa los valores por defecto.
+secrets:
+  apis-name: ${SECRET_APIS_NAME:}
+
+# Persistencia (tablas transfers e idempotency). En ECS las credenciales vienen del task role.
+dynamodb:
+  enabled: ${DYNAMODB_ENABLED:false}
+  endpoint: ${DYNAMODB_ENDPOINT:}
+  table:
+    transfers: ${DYNAMODB_TABLE_TRANSFERS:transfers}
+    idempotency: ${DYNAMODB_TABLE_IDEMPOTENCY:idempotency}
+
+# Eventos de dominio (transfers-events.asyncapi.yaml)
+sns:
+  enabled: ${SNS_ENABLED:false}
+  topic-arn: ${SNS_TOPIC_ARN:}
+  region: ${AWS_REGION:us-east-1}
+
+# Dependencias externas (WireMock en local y en ECS vía Service Connect: http://mocks:8080).
+# Las llaves salen del secreto SECRET_APIS_NAME; los mocks no las validan.
+core-banking:
+  base-url: ${CORE_BASE_URL:http://localhost:9090}
+  api-key: ${CORE_API_KEY:local-dev-key}
+
+fraud:
+  base-url: ${FRAUD_BASE_URL:http://localhost:9091}
+  api-key: ${FRAUD_API_KEY:local-dev-key}
+
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        registerHealthIndicator: true
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 10
+        minimumNumberOfCalls: 5
+        permittedNumberOfCallsInHalfOpenState: 3
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        waitDurationInOpenState: 30s
+        failureRateThreshold: 50
+    instances:
+      coreBanking:
+        baseConfig: default
+      fraud:
+        baseConfig: default
+  retry:
+    configs:
+      default:
+        maxAttempts: 3
+        waitDuration: 200ms
+        enableExponentialBackoff: true
+        exponentialBackoffMultiplier: 2
+        randomizedWaitFactor: 0.5
+        retryExceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+    instances:
+      # Solo consultas: los débitos y créditos no se reintentan a ciegas (los protege el operationId).
+      coreBanking:
+        baseConfig: default
+      fraud:
+        baseConfig: default
+  bulkhead:
+    instances:
+      coreBanking:
+        maxConcurrentCalls: 20
+        maxWaitDuration: 50ms
+      fraud:
+        maxConcurrentCalls: 20
+        maxWaitDuration: 50ms
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    # Primera: spec generada desde el código. Después: contratos de openapi/ (servidos en /openapi/*)
+    urls:
+      - name: ms-transfers (generado desde el código)
+        url: /v3/api-docs
+      - name: ms-transfers v1 (contrato)
+        url: /openapi/ms-transfers-v1.yaml
+      - name: core bancario (mock)
+        url: /openapi/core-banking.yaml
+      - name: antifraude (mock)
+        url: /openapi/fraud.yaml
+      - name: directorio de alias (mock)
+        url: /openapi/alias-directory.yaml
+    urls-primary-name: ms-transfers (generado desde el código)
+
+logging:
+  level:
+    root: INFO
+    co.com.pragma: DEBUG
+    reactor.netty: INFO

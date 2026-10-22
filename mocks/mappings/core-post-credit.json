@@ -1,0 +1,20 @@
+{
+  "name": "core · crédito registrado",
+  "request": { "method": "POST", "urlPathPattern": "/core/v1/accounts/[^/]+/credits" },
+  "response": {
+    "status": 201,
+    "headers": { "Content-Type": "application/json" },
+    "transformers": ["response-template"],
+    "jsonBody": {
+      "postingId": "CRD-{{randomValue length=8 type='NUMERIC'}}",
+      "operationId": "{{jsonPath request.body '$.operationId'}}",
+      "type": "CREDIT",
+      "status": "POSTED",
+      "amount": {
+        "value": "{{jsonPath request.body '$.amount.value'}}",
+        "currency": "{{jsonPath request.body '$.amount.currency'}}"
+      },
+      "postedAt": "{{now}}"
+    }
+  }
+}

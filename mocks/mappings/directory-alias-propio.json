@@ -1,0 +1,15 @@
+{
+  "name": "directorio · +51999111222 es el celular de la cuenta origen (SELF_TRANSFER)",
+  "request": { "method": "GET", "url": "/directory/v1/aliases/+51999111222" },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "phone": "+51999111222",
+      "bank": "PRAGBANK",
+      "accountId": "191-0001234567",
+      "holderName": "María Quispe",
+      "status": "ACTIVE"
+    }
+  }
+}

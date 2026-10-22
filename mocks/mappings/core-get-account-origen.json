@@ -1,0 +1,16 @@
+{
+  "name": "core · cuenta origen activa en soles con S/ 2,500.00",
+  "request": { "method": "GET", "url": "/core/v1/accounts/191-0001234567" },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "accountId": "191-0001234567",
+      "customerId": "CUST-000123",
+      "holderName": "María Quispe",
+      "status": "ACTIVE",
+      "currency": "PEN",
+      "availableBalance": { "value": "2500.00", "currency": "PEN" }
+    }
+  }
+}

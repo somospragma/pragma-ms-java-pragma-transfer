@@ -1,0 +1,9 @@
+logging:
+  level:
+    root: WARN
+    co.com.pragma: INFO
+    reactor.netty: WARN
+management:
+  tracing:
+    sampling:
+      probability: 0.1

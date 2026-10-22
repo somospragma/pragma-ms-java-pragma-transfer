@@ -1,0 +1,79 @@
+openapi: 3.1.0
+info:
+  title: PragBank · Antifraude (mock)
+  version: 1.0.0
+  description: |
+    Puntaje de riesgo por operación. `ms-transfers` aplica RN-07 con el `score`:
+    menor a 60 aprueba, 60 a 79 queda PENDING_REVIEW, 80 o más rechaza.
+    Si no responde en 1 segundo, la transferencia queda PENDING_REVIEW.
+servers:
+  - url: http://localhost:9091
+  - url: http://mocks.pragbank.local:8080
+paths:
+  /fraud/v1/score:
+    post:
+      operationId: scoreOperation
+      summary: Calcular puntaje de fraude
+      parameters:
+        - name: X-Correlation-Id
+          in: header
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScoreRequest'
+            example:
+              operationId: TRF-8f3c1a2e
+              customerId: CUST-000123
+              channel: ACCOUNT
+              sourceAccountId: "191-0001234567"
+              target: "191-0007654321"
+              amount: { value: "150.00", currency: PEN }
+      responses:
+        '200':
+          description: Puntaje calculado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScoreResponse'
+              examples:
+                bajo:
+                  value: { operationId: TRF-8f3c1a2e, score: 12, reasons: [] }
+                revision:
+                  value: { operationId: TRF-1a2b3c4d, score: 67, reasons: [AMOUNT_ABOVE_CUSTOMER_AVERAGE] }
+                alto:
+                  value: { operationId: TRF-9z8y7x6w, score: 91, reasons: [NEW_BENEFICIARY, UNUSUAL_HOUR] }
+        '503':
+          description: Servicio no disponible.
+components:
+  schemas:
+    Money:
+      type: object
+      required: [value, currency]
+      properties:
+        value: { type: string }
+        currency: { type: string, enum: [PEN, USD] }
+    ScoreRequest:
+      type: object
+      required: [operationId, customerId, channel, sourceAccountId, target, amount]
+      properties:
+        operationId: { type: string }
+        customerId: { type: string }
+        channel: { type: string, enum: [ACCOUNT, PHONE] }
+        sourceAccountId: { type: string }
+        target:
+          type: string
+          description: Cuenta destino o celular, según el canal.
+        amount:
+          $ref: '#/components/schemas/Money'
+    ScoreResponse:
+      type: object
+      required: [operationId, score]
+      properties:
+        operationId: { type: string }
+        score: { type: integer, minimum: 0, maximum: 100 }
+        reasons:
+          type: array
+          items: { type: string }

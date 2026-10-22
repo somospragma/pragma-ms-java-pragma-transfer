@@ -1,0 +1,6 @@
+{
+  "name": "directorio · cualquier otro celular no está afiliado (RECIPIENT_NOT_FOUND)",
+  "priority": 10,
+  "request": { "method": "GET", "urlPathPattern": "/directory/v1/aliases/.+" },
+  "response": { "status": 404 }
+}

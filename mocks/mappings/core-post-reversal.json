@@ -1,0 +1,17 @@
+{
+  "name": "core · reversa del débito",
+  "request": { "method": "POST", "urlPathPattern": "/core/v1/debits/[^/]+/reversal" },
+  "response": {
+    "status": 201,
+    "headers": { "Content-Type": "application/json" },
+    "transformers": ["response-template"],
+    "jsonBody": {
+      "postingId": "REV-{{randomValue length=8 type='NUMERIC'}}",
+      "operationId": "{{jsonPath request.body '$.operationId'}}",
+      "type": "REVERSAL",
+      "status": "POSTED",
+      "amount": { "value": "0.00", "currency": "PEN" },
+      "postedAt": "{{now}}"
+    }
+  }
+}

@@ -1,0 +1,2 @@
+org.springframework.boot.EnvironmentPostProcessor=\
+co.com.pragma.transfers.application.config.ApiKeysSecretEnvironmentPostProcessor

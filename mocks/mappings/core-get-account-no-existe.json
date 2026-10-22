@@ -1,0 +1,10 @@
+{
+  "name": "core · cualquier otra cuenta no existe",
+  "priority": 10,
+  "request": { "method": "GET", "urlPathPattern": "/core/v1/accounts/[^/]+" },
+  "response": {
+    "status": 404,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": { "code": "ACCOUNT_NOT_FOUND", "message": "Cuenta no encontrada" }
+  }
+}

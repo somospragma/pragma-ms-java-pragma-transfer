@@ -1,0 +1,16 @@
+{
+  "name": "core · cuenta destino cuyo crédito falla (escenario de compensación)",
+  "request": { "method": "GET", "url": "/core/v1/accounts/191-0009999999" },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "accountId": "191-0009999999",
+      "customerId": "CUST-000999",
+      "holderName": "Rosa Mamani",
+      "status": "ACTIVE",
+      "currency": "PEN",
+      "availableBalance": { "value": "100.00", "currency": "PEN" }
+    }
+  }
+}
